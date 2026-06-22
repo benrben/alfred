@@ -13,15 +13,13 @@ import { useEffect, useState } from "react";
 import {
   buildFormats,
   callEngine,
-  defaultFormatId,
+  CONFIG_FORMAT_ID,
   flagsForFormat,
   FormatChoice,
   getInputText,
   lastErrorLine,
   loadModes,
-  loadSettings,
   parseStatus,
-  RAW_FORMAT_ID,
   resolveDelivery,
 } from "./engine";
 import { ResultView } from "./ResultView";
@@ -33,7 +31,7 @@ interface PipelineFormProps {
 
 export function PipelineForm({ prefillSelection }: PipelineFormProps) {
   const [formats, setFormats] = useState<FormatChoice[]>([]);
-  const [formatId, setFormatId] = useState<string>(RAW_FORMAT_ID);
+  const [formatId, setFormatId] = useState<string>(CONFIG_FORMAT_ID);
   const [text, setText] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const { push } = useNavigation();
@@ -41,14 +39,12 @@ export function PipelineForm({ prefillSelection }: PipelineFormProps) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [modes, settings, input] = await Promise.all([
+      const [modes, input] = await Promise.all([
         loadModes(),
-        loadSettings(),
         prefillSelection ? getInputText() : Promise.resolve(""),
       ]);
       if (cancelled) return;
       setFormats(buildFormats(modes));
-      setFormatId(defaultFormatId(settings));
       if (input) setText(input);
       setIsLoading(false);
     })();

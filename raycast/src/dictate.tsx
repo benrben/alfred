@@ -16,7 +16,8 @@ import {
   buildFormats,
   callEngine,
   clearRecState,
-  defaultFormatId,
+  CONFIG_FORMAT_ID,
+  configFormat,
   engineEnv,
   expandHome,
   fileSize,
@@ -26,8 +27,6 @@ import {
   isAlive,
   lastErrorLine,
   loadModes,
-  loadSettings,
-  RAW_FORMAT_ID,
   readRecState,
   RecState,
   DeliveredResult,
@@ -110,18 +109,15 @@ export default function Dictate() {
   const [result, setResult] = useState<DeliveredResult | null>(null);
   const [resultNote, setResultNote] = useState("");
   const [formats, setFormats] = useState<FormatChoice[]>([]);
-  const [formatId, setFormatId] = useState<string>(RAW_FORMAT_ID);
+  const [formatId, setFormatId] = useState<string>(CONFIG_FORMAT_ID);
   const stateRef = useRef<RecState | null>(null);
 
-  // Load formats/defaults (async) and start/adopt a recording immediately.
+  // Load the format list (async) and start/adopt a recording immediately. The
+  // default stays "Default (config)" so we never contradict the user's config.
   useEffect(() => {
     (async () => {
-      const [modes, settings] = await Promise.all([
-        loadModes(),
-        loadSettings(),
-      ]);
+      const modes = await loadModes();
       setFormats(buildFormats(modes));
-      setFormatId(defaultFormatId(settings));
     })();
 
     const existing = readRecState();
@@ -173,15 +169,8 @@ export default function Dictate() {
   }
 
   function currentFormat(): FormatChoice {
-    return (
-      formats.find((f) => f.id === formatId) ?? {
-        id: RAW_FORMAT_ID,
-        title: "Raw transcript",
-        subtitle: "",
-        ai: false,
-        flags: ["--no-rewrite", "--no-translate", "--no-optimize"],
-      }
-    );
+    // Fall back to "use config" (no flags) — never to a stage-disabling raw.
+    return formats.find((f) => f.id === formatId) ?? configFormat();
   }
 
   async function stopAndTranscribe() {

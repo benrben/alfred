@@ -228,22 +228,38 @@ export async function loadSettings(): Promise<Settings | null> {
 }
 
 // ---- Formats (what the pickers offer) -------------------------------------
-// A "format" bundles the engine flags for a capture. The first is a no-AI
-// pseudo-format; the rest come from the engine's mode catalog and turn on
-// rewrite. Translate/backend are layered on separately (per preference/toggle).
+// A "format" bundles the engine flags for a capture:
+//   - CONFIG: send NO flags — the engine uses your config.toml as-is. This is
+//     the safe default: it never contradicts your translate/rewrite settings.
+//   - RAW: force every stage off (a pure transcript, no LLM).
+//   - the rest come from the engine's mode catalog and turn rewrite on.
+// Translate/backend are layered on separately (per preference/toggle).
 
+export const CONFIG_FORMAT_ID = "__config__";
 export const RAW_FORMAT_ID = "__raw__";
 
 export interface FormatChoice {
   id: string;
   title: string;
   subtitle: string;
-  ai: boolean; // does it invoke the LLM?
+  ai: boolean; // does it (or can it) invoke the LLM?
   flags: string[]; // mode/rewrite flags (no translate/backend)
+}
+
+/** The "use my config" format — no overrides. Safe fallback everywhere. */
+export function configFormat(): FormatChoice {
+  return {
+    id: CONFIG_FORMAT_ID,
+    title: "Default (config)",
+    subtitle: "Use your saved settings",
+    ai: true, // may invoke the LLM, depending on config
+    flags: [],
+  };
 }
 
 export function buildFormats(modes: Mode[]): FormatChoice[] {
   const list: FormatChoice[] = [
+    configFormat(),
     {
       id: RAW_FORMAT_ID,
       title: "Raw transcript",
@@ -264,10 +280,11 @@ export function buildFormats(modes: Mode[]): FormatChoice[] {
   return list;
 }
 
-/** Which format id reflects the current config defaults. */
+/** Which AI mode the config currently resolves to (for the "Default" star in
+ * Manage Intents). Note: this only reflects rewrite/mode, not translate. */
 export function defaultFormatId(settings: Settings | null): string {
   const p = settings?.processing;
-  if (!p || !p.rewrite) return RAW_FORMAT_ID; // rewrite off => raw, regardless of mode
+  if (!p || !p.rewrite) return RAW_FORMAT_ID;
   return p.mode || "raw";
 }
 

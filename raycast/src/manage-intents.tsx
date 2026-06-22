@@ -13,6 +13,7 @@ import { useEffect, useState } from "react";
 import {
   buildFormats,
   callEngine,
+  CONFIG_FORMAT_ID,
   defaultFormatId,
   lastErrorLine,
   loadModes,
@@ -44,7 +45,7 @@ export default function ManageIntents() {
     reload();
   }, []);
 
-  const formats = buildFormats(modes);
+  const formats = buildFormats(modes).filter((f) => f.id !== CONFIG_FORMAT_ID);
   const defaultId = defaultFormatId(settings);
 
   async function makeDefault(fmtId: string) {
