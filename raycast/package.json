@@ -43,6 +43,13 @@
       "description": "Menu-bar control: recording state plus quick access to dictate, transform, and history.",
       "mode": "menu-bar",
       "interval": "1m"
+    },
+    {
+      "name": "engine-status",
+      "title": "Engine Status",
+      "subtitle": "Alfred",
+      "description": "Check the warm daemon, resolved engine paths, and run the engine's doctor.",
+      "mode": "view"
     }
   ],
   "preferences": [

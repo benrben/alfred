@@ -21,7 +21,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 export interface Preferences {
   daemonPort: string;
@@ -66,6 +66,37 @@ export function engineEnv(): NodeJS.ProcessEnv {
   return { ...process.env, PATH: enrichedPath(), HOME: homedir() };
 }
 
+/** Candidate locations for the engine script, best first. */
+function candidateScripts(): string[] {
+  const fromPref = expandHome(getPrefs().engineScript);
+  return [
+    fromPref,
+    join(homedir(), "Claude/Projects/alfred/voicebridge.py"),
+    join(homedir(), "alfred/voicebridge.py"),
+    join(homedir(), "Projects/alfred/voicebridge.py"),
+    join(homedir(), "src/alfred/voicebridge.py"),
+  ].filter(Boolean);
+}
+
+/** Resolve voicebridge.py: the preference if it exists, else a known location.
+ * Keeps the extension working even if the path preference is stale. */
+export function resolveScript(): string {
+  for (const c of candidateScripts()) {
+    if (existsSync(c)) return c;
+  }
+  return candidateScripts()[0] || "voicebridge.py";
+}
+
+/** Resolve the python that runs the engine: the preference, else the venv beside
+ * the script, else python3 on PATH. */
+export function resolvePython(scriptPath: string): string {
+  const pref = expandHome(getPrefs().pythonBin);
+  if (pref && existsSync(pref)) return pref;
+  const venv = join(dirname(scriptPath), ".venv", "bin", "python3");
+  if (existsSync(venv)) return venv;
+  return "python3";
+}
+
 export interface EngineResult {
   code: number;
   out: string;
@@ -73,6 +104,22 @@ export interface EngineResult {
 }
 
 const DAEMON_TIMEOUT_MS = 120_000;
+
+export function daemonPort(): string {
+  return (getPrefs().daemonPort || "8763").trim();
+}
+
+/** Quick health check of the warm daemon (GET /). */
+export async function pingDaemon(): Promise<boolean> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${daemonPort()}/`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
 
 export async function callEngine(argv: string[]): Promise<EngineResult> {
   const prefs = getPrefs();
@@ -97,9 +144,8 @@ export async function callEngine(argv: string[]): Promise<EngineResult> {
 }
 
 function runOneShot(argv: string[]): Promise<EngineResult> {
-  const prefs = getPrefs();
-  const py = expandHome(prefs.pythonBin);
-  const script = expandHome(prefs.engineScript);
+  const script = resolveScript();
+  const py = resolvePython(script);
   return new Promise((resolve) => {
     let out = "";
     let err = "";
@@ -120,8 +166,8 @@ function runOneShot(argv: string[]): Promise<EngineResult> {
 /** Launch the warm engine daemon, detached, so it survives this command. */
 export function startDaemon(): void {
   const prefs = getPrefs();
-  const py = expandHome(prefs.pythonBin);
-  const script = expandHome(prefs.engineScript);
+  const script = resolveScript();
+  const py = resolvePython(script);
   const port = (prefs.daemonPort || "8763").trim();
   try {
     const child = spawn(py, [script, "serve", "--port", port], {
