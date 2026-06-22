@@ -26,7 +26,6 @@ import { dirname, join } from "node:path";
 export interface Preferences {
   daemonPort: string;
   backend: string; // default | auto | claude | codex
-  defaultMode: string; // email|message|… or "" (use config)
   translate: string; // default | on | off
   pythonBin: string;
   engineScript: string;
@@ -200,24 +199,110 @@ export async function loadModes(): Promise<Mode[]> {
   return [];
 }
 
-export interface CommonOverrides {
-  mode?: string;
-  backend?: string;
-  translate?: string;
+// ---- Settings (backend/model + processing defaults) ----------------------
+
+export interface Processing {
+  mode: string;
+  rewrite: boolean;
+  translate: boolean;
+  optimize: boolean;
+  translate_via: string;
 }
 
-/** Per-run flags from preferences (+ optional per-command overrides). */
-export function commonFlags(o: CommonOverrides = {}): string[] {
-  const prefs = getPrefs();
-  const flags: string[] = [];
-  const backend = (o.backend ?? prefs.backend ?? "default").trim();
-  if (backend && backend !== "default") flags.push("--backend", backend);
-  const mode = (o.mode ?? prefs.defaultMode ?? "").trim();
-  if (mode) flags.push("--mode", mode); // --mode <x> also enables --rewrite for x != raw
-  const translate = (o.translate ?? prefs.translate ?? "default").trim();
-  if (translate === "on") flags.push("--translate");
-  else if (translate === "off") flags.push("--no-translate");
-  return flags;
+export interface Settings {
+  backend: string;
+  claude_model: string;
+  codex_model: string;
+  claude_models: string[];
+  codex_models: string[];
+  processing: Processing;
+}
+
+export async function loadSettings(): Promise<Settings | null> {
+  const res = await callEngine(["settings"]);
+  try {
+    return JSON.parse(res.out) as Settings;
+  } catch {
+    return null;
+  }
+}
+
+// ---- Formats (what the pickers offer) -------------------------------------
+// A "format" bundles the engine flags for a capture. The first is a no-AI
+// pseudo-format; the rest come from the engine's mode catalog and turn on
+// rewrite. Translate/backend are layered on separately (per preference/toggle).
+
+export const RAW_FORMAT_ID = "__raw__";
+
+export interface FormatChoice {
+  id: string;
+  title: string;
+  subtitle: string;
+  ai: boolean; // does it invoke the LLM?
+  flags: string[]; // mode/rewrite flags (no translate/backend)
+}
+
+export function buildFormats(modes: Mode[]): FormatChoice[] {
+  const list: FormatChoice[] = [
+    {
+      id: RAW_FORMAT_ID,
+      title: "Raw transcript",
+      subtitle: "No AI — exactly what you said",
+      ai: false,
+      flags: ["--no-rewrite", "--no-translate", "--no-optimize"],
+    },
+  ];
+  for (const m of modes) {
+    list.push({
+      id: m.key,
+      title: m.label || m.key,
+      subtitle: m.description || "",
+      ai: true,
+      flags: ["--mode", m.key, "--rewrite"],
+    });
+  }
+  return list;
+}
+
+/** Which format id reflects the current config defaults. */
+export function defaultFormatId(settings: Settings | null): string {
+  const p = settings?.processing;
+  if (!p || !p.rewrite) return RAW_FORMAT_ID; // rewrite off => raw, regardless of mode
+  return p.mode || "raw";
+}
+
+/** Backend flag: explicit override, else preference (empty when "default"). */
+export function backendFlags(override?: string): string[] {
+  const b = (override ?? getPrefs().backend ?? "default").trim();
+  return b && b !== "default" ? ["--backend", b] : [];
+}
+
+/** Translate flag: explicit override, else preference, else config (none). */
+export function translateFlags(override?: string): string[] {
+  const t = (override ?? getPrefs().translate ?? "default").trim();
+  if (t === "on") return ["--translate"];
+  if (t === "off") return ["--no-translate"];
+  return [];
+}
+
+/** Full per-run flags for a chosen format. */
+export function flagsForFormat(
+  fmt: FormatChoice,
+  opts: { translate?: string; backend?: string } = {},
+): string[] {
+  // Raw already pins --no-translate; don't let a translate toggle contradict it.
+  const translate = fmt.ai ? translateFlags(opts.translate) : [];
+  return [...fmt.flags, ...translate, ...backendFlags(opts.backend)];
+}
+
+/** Persist a format as the new default ([processing] mode + rewrite). */
+export async function setDefaultFormat(fmt: FormatChoice): Promise<boolean> {
+  const argv =
+    fmt.id === RAW_FORMAT_ID
+      ? ["set-processing", "--mode", "raw", "--no-rewrite"]
+      : ["set-processing", "--mode", fmt.id, "--rewrite"];
+  const res = await callEngine(argv);
+  return (res.out || "").includes("saved");
 }
 
 /** Parse the engine's machine-readable last line: "VB_STATUS\tkind[\textra…]". */

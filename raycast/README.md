@@ -6,21 +6,32 @@ daemon (`voicebridge.py serve`) over localhost HTTP and falls back to spawning
 the CLI if the daemon is down — so dictation reuses the already-loaded Whisper
 model and no API key is ever involved.
 
+## Formats (where Claude comes in)
+
+Every capture runs through a **format**. **Raw transcript** does **no AI** — it's
+exactly what you said. Every other format (**Cleanup only**, **Email**,
+**Message**, **Commit**, **Prompt**, **Notes**, or your own) runs Claude/Codex to
+clean up and reshape the text. The pickers default to your configured default,
+which you set — and see — in **Manage Intents**. If output looks word-for-word,
+the active format is **Raw**; switch it (or change the default).
+
 ## Commands
 
-- **Dictate** — opens a live recorder (via `sox`): a running timer and a mic-level
-  bar, with **⏎** to stop & transcribe, then Paste/Copy the transcript inline.
-  **⌃C** cancels; **Esc** keeps recording in the background and reopening Dictate
-  re-adopts that take. Bind a Raycast hotkey to it.
-- **Transform Text** — prefilled from the current selection (or clipboard): edit,
-  pick a format, run, then Copy/Paste the cleaned result back.
+- **Dictate** — a live recorder (via `sox`): running timer + mic-level bar, the
+  active **output format** shown (`⌘F` to change it for this take). **⏎** stops &
+  transcribes, then Paste / Copy / **Reprocess as…** / Dictate Again inline.
+  **⌃C** cancels; **Esc** keeps recording in the background (reopen to stop).
+- **Transform Text** — prefilled from the selection (or clipboard): pick a format,
+  run, then Copy / Paste / Reprocess the result.
 - **Type & Process** — type a line and run it through the pipeline.
-- **History** — browse recent results (read from `~/.voicebridge/history`); copy
-  or paste any of them.
-- **Alfred Menu Bar** — shows recording state and gives quick access to the
-  commands above.
-- **Engine Status** — pings the warm daemon, shows the resolved engine paths, and
-  runs the engine's `doctor`. Handy right after install.
+- **History** — browse recent results (from `~/.voicebridge/history`); copy/paste.
+- **Manage Intents** — see which format is the **default** (starred), **Set as
+  Default**, and **edit/add** the rewrite **prompt** behind each one. Saves to
+  `config.toml` via the engine, so it applies to every front-end. Also a `⌘I`
+  action on the Transform/Type forms.
+- **Alfred Menu Bar** — recording state + quick access to every command.
+- **Engine Status** — daemon health, the current **default format / stages /
+  backend**, resolved paths, and the engine's `doctor`. Handy right after install.
 
 ## Setup
 
@@ -55,8 +66,9 @@ running while you edit.
 Set in Raycast → Extensions → Alfred. All optional:
 
 - **Daemon Port** (default `8763`) — must match the engine's `serve` port.
-- **LLM Backend** / **Default Format** / **Translate** — per-capture overrides on
-  top of your `config.toml`.
+- **LLM Backend** / **Translate** — fallback defaults when a picker is left on
+  "Default (config)". (The default *format* lives in config — set it in **Manage
+  Intents**, not here.)
 - **Python (venv)** / **Engine Script** / **sox Path** — only used to start the
   daemon or fall back when it's down; `~` is expanded.
 

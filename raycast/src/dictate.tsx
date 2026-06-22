@@ -13,21 +13,28 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { useEffect, useRef, useState } from "react";
 import {
+  buildFormats,
   callEngine,
   clearRecState,
-  commonFlags,
-  DeliveredResult,
+  defaultFormatId,
   engineEnv,
   expandHome,
   fileSize,
+  flagsForFormat,
+  FormatChoice,
   getPrefs,
   isAlive,
   lastErrorLine,
+  loadModes,
+  loadSettings,
+  RAW_FORMAT_ID,
   readRecState,
   RecState,
+  DeliveredResult,
   resolveDelivery,
   writeRecState,
 } from "./lib/engine";
+import { ResultView } from "./lib/ResultView";
 
 type Phase = "recording" | "transcribing" | "done" | "error";
 
@@ -37,7 +44,6 @@ function fmtTime(secs: number): string {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
-// Bounded tail read so a long recording's meter file stays cheap to poll.
 function tailFile(file: string, bytes = 8192): string {
   try {
     const fd = openSync(file, "r");
@@ -58,7 +64,6 @@ function tailFile(file: string, bytes = 8192): string {
 }
 
 // sox -S writes a VU meter to stderr as a bracketed segment containing a '|'.
-// Turn its "fill" into a 0..1 level, like the Hammerspoon front-end does.
 function readLevel(meterFile?: string): number {
   if (!meterFile) return 0;
   const data = tailFile(meterFile);
@@ -67,10 +72,9 @@ function readLevel(meterFile?: string): number {
   for (let i = segs.length - 1; i >= 0 && i > segs.length - 8; i--) {
     const m = segs[i].match(/\[([^[\]]*\|[^[\]]*)\]/);
     if (m) {
-      const meter = m[1];
       let fill = 0;
       let total = 0;
-      for (const ch of meter) {
+      for (const ch of m[1]) {
         total++;
         if (ch !== " " && ch !== "|") fill++;
       }
@@ -90,7 +94,7 @@ function waitForExit(pid: number, timeoutMs: number): Promise<void> {
     const start = Date.now();
     const tick = () => {
       if (!isAlive(pid) || Date.now() - start > timeoutMs) {
-        setTimeout(resolve, 150); // small grace so the WAV is flushed
+        setTimeout(resolve, 150);
         return;
       }
       setTimeout(tick, 100);
@@ -101,16 +105,28 @@ function waitForExit(pid: number, timeoutMs: number): Promise<void> {
 
 export default function Dictate() {
   const [phase, setPhase] = useState<Phase>("recording");
-  const [, setTick] = useState(0); // forces re-render for the live timer/meter
+  const [, setTick] = useState(0);
+  const [error, setError] = useState("");
   const [result, setResult] = useState<DeliveredResult | null>(null);
-  const [error, setError] = useState<string>("");
+  const [resultNote, setResultNote] = useState("");
+  const [formats, setFormats] = useState<FormatChoice[]>([]);
+  const [formatId, setFormatId] = useState<string>(RAW_FORMAT_ID);
   const stateRef = useRef<RecState | null>(null);
 
-  // Start (or adopt) a recording on mount.
+  // Load formats/defaults (async) and start/adopt a recording immediately.
   useEffect(() => {
+    (async () => {
+      const [modes, settings] = await Promise.all([
+        loadModes(),
+        loadSettings(),
+      ]);
+      setFormats(buildFormats(modes));
+      setFormatId(defaultFormatId(settings));
+    })();
+
     const existing = readRecState();
     if (existing && isAlive(existing.pid)) {
-      stateRef.current = existing; // re-adopt a recording already in progress
+      stateRef.current = existing;
       setPhase("recording");
     } else {
       if (existing) clearRecState();
@@ -119,7 +135,6 @@ export default function Dictate() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Tick the timer/meter while recording.
   useEffect(() => {
     if (phase !== "recording") return;
     const id = setInterval(() => setTick((t) => t + 1), 200);
@@ -127,11 +142,10 @@ export default function Dictate() {
   }, [phase]);
 
   function startRecording() {
-    const prefs = getPrefs();
-    const sox = expandHome(prefs.soxBin);
+    const sox = expandHome(getPrefs().soxBin);
     if (!existsSync(sox)) {
       setError(
-        `sox not found at ${sox}. Install it (brew install sox) or fix the path in preferences.`,
+        `sox not found at ${sox}. Install it (brew install sox) or set its path in preferences.`,
       );
       setPhase("error");
       return;
@@ -144,11 +158,7 @@ export default function Dictate() {
       const child = spawn(
         sox,
         ["-d", "-S", "-r", "16000", "-c", "1", "-b", "16", wav],
-        {
-          detached: true,
-          stdio: ["ignore", "ignore", fd],
-          env: engineEnv(),
-        },
+        { detached: true, stdio: ["ignore", "ignore", fd], env: engineEnv() },
       );
       child.unref();
       closeSync(fd);
@@ -162,12 +172,25 @@ export default function Dictate() {
     }
   }
 
+  function currentFormat(): FormatChoice {
+    return (
+      formats.find((f) => f.id === formatId) ?? {
+        id: RAW_FORMAT_ID,
+        title: "Raw transcript",
+        subtitle: "",
+        ai: false,
+        flags: ["--no-rewrite", "--no-translate", "--no-optimize"],
+      }
+    );
+  }
+
   async function stopAndTranscribe() {
     const st = stateRef.current;
     if (!st) return;
+    const fmt = currentFormat();
     setPhase("transcribing");
     try {
-      process.kill(st.pid, "SIGINT"); // sox finalizes the WAV on SIGINT
+      process.kill(st.pid, "SIGINT");
     } catch {
       // already gone
     }
@@ -178,10 +201,11 @@ export default function Dictate() {
       setPhase("error");
       return;
     }
-    const res = await callEngine(["process", st.wav, ...commonFlags()]);
+    const res = await callEngine(["process", st.wav, ...flagsForFormat(fmt)]);
     const delivered = await resolveDelivery(res);
     if (delivered.kind === "copied" || delivered.kind === "saved") {
       setResult(delivered);
+      setResultNote(fmt.ai ? fmt.title : "Raw transcript");
       setPhase("done");
     } else if (delivered.kind === "empty") {
       setError("No speech detected.");
@@ -208,57 +232,31 @@ export default function Dictate() {
 
   function dictateAgain() {
     setResult(null);
+    setResultNote("");
     setError("");
     startRecording();
   }
 
-  // ---- render -------------------------------------------------------------
-  if (phase === "recording") {
-    const st = stateRef.current;
-    const elapsed = st ? Math.floor((Date.now() - st.startedAt) / 1000) : 0;
-    const level = readLevel(st?.meter);
-    const md = [
-      "# 🔴 Recording",
-      "",
-      `## ${fmtTime(elapsed)}`,
-      "",
-      `\`${levelBar(level)}\``,
-      "",
-      "Speak now — **⏎** stop & transcribe · **⌃C** cancel · **Esc** keeps recording (reopen Dictate to stop).",
-    ].join("\n");
+  if (phase === "done" && result) {
     return (
-      <Detail
-        markdown={md}
-        navigationTitle={`🔴 Recording — ${fmtTime(elapsed)}`}
-        actions={
-          <ActionPanel>
-            <Action
-              title="Stop & Transcribe"
-              icon={Icon.Stop}
-              onAction={stopAndTranscribe}
-            />
-            <Action
-              title="Cancel"
-              icon={Icon.XMarkCircle}
-              shortcut={{ modifiers: ["ctrl"], key: "c" }}
-              onAction={cancel}
-            />
-          </ActionPanel>
-        }
+      <ResultView
+        initialText={result.text ?? ""}
+        path={result.path}
+        llmFailed={result.llmFailed}
+        formats={formats}
+        note={resultNote}
+        onDictateAgain={dictateAgain}
       />
     );
   }
 
   if (phase === "transcribing") {
+    const fmt = currentFormat();
     return (
       <Detail
         isLoading
         navigationTitle="Transcribing…"
-        markdown={
-          "# ⏳ Transcribing…\n\nRunning speech-to-text" +
-          (commonFlags().length ? " + cleanup" : "") +
-          " through the Alfred engine."
-        }
+        markdown={`# ⏳ Transcribing…\n\nSpeech-to-text${fmt.ai ? ` + ${fmt.title}` : ""} via the Alfred engine.`}
       />
     );
   }
@@ -273,7 +271,7 @@ export default function Dictate() {
             <Action
               title="Dictate Again"
               icon={Icon.Microphone}
-              onAction={dictateAgain}
+              onAction={startRecording}
             />
             <Action
               title="Open Preferences"
@@ -286,29 +284,53 @@ export default function Dictate() {
     );
   }
 
-  // done
-  const text = result?.text ?? "";
-  const header = result?.llmFailed
-    ? "> ⚠️ LLM step failed — raw transcript below.\n\n"
-    : result?.kind === "saved"
-      ? `> 💾 Saved to \`${result?.path}\`\n\n`
-      : "";
+  // recording
+  const st = stateRef.current;
+  const elapsed = st ? Math.floor((Date.now() - st.startedAt) / 1000) : 0;
+  const level = readLevel(st?.meter);
+  const fmt = currentFormat();
+  const md = [
+    "# 🔴 Recording",
+    "",
+    `## ${fmtTime(elapsed)}`,
+    "",
+    `\`${levelBar(level)}\``,
+    "",
+    `**Output:** ${fmt.ai ? fmt.title : "Raw transcript (no AI)"}  ·  ⌘F to change`,
+    "",
+    "**⏎** stop & transcribe · **⌃C** cancel · **Esc** keeps recording (reopen to stop).",
+  ].join("\n");
+
   return (
     <Detail
-      navigationTitle="Transcript"
-      markdown={`${header}${text || "_(empty)_"}`}
+      markdown={md}
+      navigationTitle={`🔴 Recording — ${fmtTime(elapsed)}`}
       actions={
         <ActionPanel>
-          <Action.Paste title="Paste to Frontmost App" content={text} />
-          <Action.CopyToClipboard
-            title="Copy"
-            content={text}
-            shortcut={{ modifiers: ["cmd"], key: "c" }}
-          />
           <Action
-            title="Dictate Again"
-            icon={Icon.Microphone}
-            onAction={dictateAgain}
+            title="Stop & Transcribe"
+            icon={Icon.Stop}
+            onAction={stopAndTranscribe}
+          />
+          <ActionPanel.Submenu
+            title={`Output: ${fmt.ai ? fmt.title : "Raw (no AI)"}`}
+            icon={Icon.Wand}
+            shortcut={{ modifiers: ["cmd"], key: "f" }}
+          >
+            {formats.map((f) => (
+              <Action
+                key={f.id}
+                title={f.ai ? f.title : `${f.title} — no AI`}
+                icon={f.ai ? Icon.Wand : Icon.Text}
+                onAction={() => setFormatId(f.id)}
+              />
+            ))}
+          </ActionPanel.Submenu>
+          <Action
+            title="Cancel"
+            icon={Icon.XMarkCircle}
+            shortcut={{ modifiers: ["ctrl"], key: "c" }}
+            onAction={cancel}
           />
         </ActionPanel>
       }

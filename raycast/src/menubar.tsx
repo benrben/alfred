@@ -36,6 +36,11 @@ export default function MenuBar() {
         icon={Icon.Clock}
         onAction={open("history")}
       />
+      <MenuBarExtra.Item
+        title="Manage Intents"
+        icon={Icon.Pencil}
+        onAction={open("manage-intents")}
+      />
       <MenuBarExtra.Separator />
       <MenuBarExtra.Item
         title="Engine Status"

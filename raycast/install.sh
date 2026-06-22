@@ -79,8 +79,8 @@ cat <<'EOF'
 
 ------------------------------------------------------------------
 Installed. Open Raycast and search "Alfred". Commands:
-  Dictate (Toggle) · Transform Text · Type & Process · History
-  Alfred Menu Bar · Engine Status
+  Dictate · Transform Text · Type & Process · Manage Intents
+  History · Alfred Menu Bar · Engine Status
 
 Next:
   1. Run "Engine Status" once to confirm the engine is reachable.

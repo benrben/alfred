@@ -37,6 +37,13 @@
       "mode": "view"
     },
     {
+      "name": "manage-intents",
+      "title": "Manage Intents",
+      "subtitle": "Alfred",
+      "description": "View, edit, and add the rewrite prompts behind each format (email, commit, your own…).",
+      "mode": "view"
+    },
+    {
       "name": "menubar",
       "title": "Alfred Menu Bar",
       "subtitle": "Alfred",
@@ -74,14 +81,6 @@
         { "title": "claude", "value": "claude" },
         { "title": "codex", "value": "codex" }
       ]
-    },
-    {
-      "name": "defaultMode",
-      "title": "Default Format",
-      "description": "Default rewrite mode (email|message|commit|prompt|notes|raw or a custom one). Leave empty to use your config.",
-      "type": "textfield",
-      "required": false,
-      "default": ""
     },
     {
       "name": "translate",

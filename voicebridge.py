@@ -756,6 +756,22 @@ def cmd_set_model(args) -> int:
     return 0
 
 
+def cmd_set_processing(args) -> int:
+    """Persist the [processing] defaults a front-end can change: the default
+    mode/intent and the rewrite/translate/optimize stage toggles. Only the flags
+    actually passed are written, so callers can set one thing at a time."""
+    path = _config_target(args)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if args.mode is not None:
+        _set_config_kv(path, "processing", "mode", _toml_str(args.mode))
+    for stage in ("rewrite", "translate", "optimize"):
+        val = getattr(args, stage)
+        if val is not None:
+            _set_config_kv(path, "processing", stage, "true" if val else "false")
+    print(STATUS + "\tsaved")
+    return 0
+
+
 # Selectable model presets per backend. Claude aliases track the latest model.
 # Extend either list from config.toml:  [llm] claude_models / codex_models = [...]
 _CLAUDE_MODELS = ["opus", "sonnet", "haiku"]
@@ -763,9 +779,11 @@ _CODEX_MODELS: list[str] = []
 
 
 def cmd_settings(args) -> int:
-    """Current backend/model settings AND the selectable model lists, as JSON,
-    for the front-end's dropdowns."""
-    llm = load_config(args.config)["llm"]
+    """Current backend/model settings, the selectable model lists, AND the
+    [processing] defaults, as JSON for the front-end's dropdowns/badges."""
+    cfg = load_config(args.config)
+    llm = cfg["llm"]
+    proc = cfg["processing"]
 
     def models(defaults, key):
         out = list(defaults)
@@ -780,6 +798,13 @@ def cmd_settings(args) -> int:
         "codex_model": llm.get("codex_model", ""),
         "claude_models": models(_CLAUDE_MODELS, "claude_models"),
         "codex_models": models(_CODEX_MODELS, "codex_models"),
+        "processing": {
+            "mode": proc.get("mode", "raw"),
+            "rewrite": bool(proc.get("rewrite")),
+            "translate": bool(proc.get("translate")),
+            "optimize": bool(proc.get("optimize")),
+            "translate_via": proc.get("translate_via", "llm"),
+        },
     }))
     return 0
 
@@ -1005,6 +1030,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_set.add_argument("--model", default="")
     p_set.add_argument("--config")
     p_set.set_defaults(func=cmd_set_model)
+
+    p_sp = sub.add_parser("set-processing",
+                          help="persist [processing] defaults (mode + stage toggles)")
+    p_sp.add_argument("--mode", help="default rewrite mode/intent, or 'raw'")
+    _bool_flag(p_sp, "rewrite", "enable rewrite by default", "disable rewrite by default")
+    _bool_flag(p_sp, "translate", "translate by default", "do not translate by default")
+    _bool_flag(p_sp, "optimize", "optimize by default", "do not optimize by default")
+    p_sp.add_argument("--config")
+    p_sp.set_defaults(func=cmd_set_processing)
 
     p_get = sub.add_parser("settings", help="print backend/model settings + lists as JSON")
     p_get.add_argument("--config")

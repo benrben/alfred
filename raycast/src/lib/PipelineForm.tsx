@@ -1,25 +1,30 @@
 import {
   Action,
   ActionPanel,
-  Detail,
   Form,
   Icon,
+  LaunchType,
   Toast,
+  launchCommand,
   showToast,
   useNavigation,
 } from "@raycast/api";
 import { useEffect, useState } from "react";
 import {
+  buildFormats,
   callEngine,
-  commonFlags,
+  defaultFormatId,
+  flagsForFormat,
+  FormatChoice,
   getInputText,
-  getPrefs,
   lastErrorLine,
   loadModes,
-  Mode,
+  loadSettings,
   parseStatus,
+  RAW_FORMAT_ID,
   resolveDelivery,
 } from "./engine";
+import { ResultView } from "./ResultView";
 
 interface PipelineFormProps {
   /** Prefill the text field from the current selection / clipboard. */
@@ -27,21 +32,23 @@ interface PipelineFormProps {
 }
 
 export function PipelineForm({ prefillSelection }: PipelineFormProps) {
-  const [modes, setModes] = useState<Mode[]>([]);
+  const [formats, setFormats] = useState<FormatChoice[]>([]);
+  const [formatId, setFormatId] = useState<string>(RAW_FORMAT_ID);
   const [text, setText] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const { push } = useNavigation();
-  const prefs = getPrefs();
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [loaded, input] = await Promise.all([
+      const [modes, settings, input] = await Promise.all([
         loadModes(),
+        loadSettings(),
         prefillSelection ? getInputText() : Promise.resolve(""),
       ]);
       if (cancelled) return;
-      setModes(loaded);
+      setFormats(buildFormats(modes));
+      setFormatId(defaultFormatId(settings));
       if (input) setText(input);
       setIsLoading(false);
     })();
@@ -52,9 +59,9 @@ export function PipelineForm({ prefillSelection }: PipelineFormProps) {
 
   async function onSubmit(values: {
     text: string;
-    mode: string;
-    backend: string;
+    format: string;
     translate: string;
+    backend: string;
   }) {
     const body = (values.text ?? "").trim();
     if (!body) {
@@ -64,14 +71,22 @@ export function PipelineForm({ prefillSelection }: PipelineFormProps) {
       });
       return;
     }
+    const fmt =
+      formats.find((f) => f.id === values.format) ?? formats[0] ?? null;
+    if (!fmt) {
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "No formats loaded",
+      });
+      return;
+    }
     const toast = await showToast({
       style: Toast.Style.Animated,
-      title: "Processing…",
+      title: fmt.ai ? `Running — ${fmt.title}…` : "Cleaning up…",
     });
-    const flags = commonFlags({
-      mode: values.mode || undefined,
-      backend: values.backend || undefined,
-      translate: values.translate || undefined,
+    const flags = flagsForFormat(fmt, {
+      translate: values.translate,
+      backend: values.backend,
     });
     const res = await callEngine(["text", body, ...flags]);
     if (res.code !== 0 && !parseStatus(res.out)) {
@@ -98,10 +113,12 @@ export function PipelineForm({ prefillSelection }: PipelineFormProps) {
       return;
     }
     push(
-      <ResultDetail
-        text={delivered.text ?? ""}
+      <ResultView
+        initialText={delivered.text ?? ""}
         path={delivered.path}
         llmFailed={delivered.llmFailed}
+        formats={formats}
+        note={fmt.ai ? fmt.title : "Raw transcript"}
       />,
     );
   }
@@ -116,6 +133,17 @@ export function PipelineForm({ prefillSelection }: PipelineFormProps) {
             icon={Icon.Wand}
             onSubmit={onSubmit}
           />
+          <Action
+            title="Manage Intents…"
+            icon={Icon.Pencil}
+            shortcut={{ modifiers: ["cmd"], key: "i" }}
+            onAction={() =>
+              launchCommand({
+                name: "manage-intents",
+                type: LaunchType.UserInitiated,
+              })
+            }
+          />
         </ActionPanel>
       }
     >
@@ -127,66 +155,32 @@ export function PipelineForm({ prefillSelection }: PipelineFormProps) {
         onChange={setText}
       />
       <Form.Dropdown
-        id="mode"
+        id="format"
         title="Format"
-        defaultValue={prefs.defaultMode || ""}
+        value={formatId}
+        onChange={setFormatId}
+        info="Raw = no AI. Anything else runs Claude/Codex to clean up and reshape."
       >
-        <Form.Dropdown.Item value="" title="Default (use config)" />
-        {modes.map((m) => (
+        {formats.map((f) => (
           <Form.Dropdown.Item
-            key={m.key}
-            value={m.key}
-            title={m.label || m.key}
-            // description shown via the title; keep it simple
+            key={f.id}
+            value={f.id}
+            title={f.ai ? f.title : `${f.title} — no AI`}
+            icon={f.ai ? Icon.Wand : Icon.Text}
           />
         ))}
       </Form.Dropdown>
-      <Form.Dropdown
-        id="backend"
-        title="LLM backend"
-        defaultValue={prefs.backend || "default"}
-      >
+      <Form.Dropdown id="translate" title="Translate" defaultValue="default">
+        <Form.Dropdown.Item value="default" title="Default (config)" />
+        <Form.Dropdown.Item value="on" title="Translate to English" />
+        <Form.Dropdown.Item value="off" title="Do not translate" />
+      </Form.Dropdown>
+      <Form.Dropdown id="backend" title="LLM backend" defaultValue="default">
         <Form.Dropdown.Item value="default" title="Default (config)" />
         <Form.Dropdown.Item value="auto" title="auto" />
         <Form.Dropdown.Item value="claude" title="claude" />
         <Form.Dropdown.Item value="codex" title="codex" />
       </Form.Dropdown>
-      <Form.Dropdown
-        id="translate"
-        title="Translate"
-        defaultValue={prefs.translate || "default"}
-      >
-        <Form.Dropdown.Item value="default" title="Default (config)" />
-        <Form.Dropdown.Item value="on" title="Translate to English" />
-        <Form.Dropdown.Item value="off" title="Do not translate" />
-      </Form.Dropdown>
     </Form>
-  );
-}
-
-interface ResultDetailProps {
-  text: string;
-  path?: string;
-  llmFailed: boolean;
-}
-
-export function ResultDetail({ text, path, llmFailed }: ResultDetailProps) {
-  const header = llmFailed
-    ? "> ⚠️ LLM step failed — this is the raw transcript.\n\n"
-    : path
-      ? `> 💾 Saved to \`${path}\`\n\n`
-      : "";
-  const markdown = `${header}${text || "_(empty)_"}`;
-  return (
-    <Detail
-      markdown={markdown}
-      actions={
-        <ActionPanel>
-          <Action.CopyToClipboard title="Copy" content={text} />
-          <Action.Paste title="Paste to Frontmost App" content={text} />
-          {path ? <Action.ShowInFinder path={path} /> : null}
-        </ActionPanel>
-      }
-    />
   );
 }
