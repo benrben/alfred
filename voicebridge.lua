@@ -1,4 +1,4 @@
--- Alferd — Hammerspoon front-end
+-- Alfred — Hammerspoon front-end
 -- Global hotkeys + audio recording + menu-bar + typed input, driving the
 -- Python engine (voicebridge.py).
 --
@@ -295,18 +295,18 @@ function onResult(code, out, err)
     local ok, e = pcall(updateResult, txt, llmFailed)
     if not ok then
       dbg("updateResult ERROR: " .. tostring(e))
-      notify("Alferd", llmFailed and "Copied raw transcript (LLM step failed)"
+      notify("Alfred", llmFailed and "Copied raw transcript (LLM step failed)"
                                         or "Copied to clipboard ✓")
     end
   elseif kind == "saved" then
     local path = parts[2]
-    notify("Alferd", "Too long — saved to file (click to reveal)",
+    notify("Alfred", "Too long — saved to file (click to reveal)",
       function() if path then hs.execute("open -R '" .. path .. "'") end end)
   elseif kind == "empty" then
-    notify("Alferd", "No speech detected.")
+    notify("Alfred", "No speech detected.")
   else
     local tail = (err or ""):gsub("%s+$", ""):match("[^\r\n]+$") or "see Hammerspoon console"
-    notify("Alferd", "Error: " .. tail)
+    notify("Alfred", "Error: " .. tail)
   end
 end
 
@@ -316,7 +316,7 @@ end
 function startDaemon()
   hs.execute("PATH='" .. USER_PATH .. "' HOME='" .. HOME .. "' nohup '" .. PYTHON ..
     "' '" .. SCRIPT .. "' serve --port " .. DAEMON_PORT ..
-    " >/tmp/alferd_daemon.log 2>&1 &")
+    " >/tmp/alfred_daemon.log 2>&1 &")
   dbg("startDaemon: launched detached on :" .. DAEMON_PORT)
 end
 
@@ -328,7 +328,7 @@ end
 
 function restartDaemon()
   hs.execute("pkill -f 'voicebridge.py serve' 2>/dev/null")
-  hs.alert.show("Restarting Alferd engine…", 1)
+  hs.alert.show("Restarting Alfred engine…", 1)
   hs.timer.doAfter(0.6, startDaemon)
 end
 
@@ -340,7 +340,7 @@ function runEngineOneShot(cmd)
   VB.engineTask:setEnvironment(TASK_ENV)
   if not VB.engineTask:start() then
     setState("idle")
-    notify("Alferd", "Could not launch the engine. Check PYTHON path in voicebridge.lua")
+    notify("Alfred", "Could not launch the engine. Check PYTHON path in voicebridge.lua")
   end
 end
 
@@ -408,13 +408,13 @@ function onRecDone()
     runEngine({ "process", VB.wav })
   else
     setState("idle")
-    notify("Alferd", "Nothing recorded.")
+    notify("Alfred", "Nothing recorded.")
   end
 end
 
 function startRecording()
   if not hs.fs.attributes(SOX) then
-    notify("Alferd", "sox not found at " .. SOX .. " — run: brew install sox")
+    notify("Alfred", "sox not found at " .. SOX .. " — run: brew install sox")
     VB.captureFlags = nil
     return
   end
@@ -431,7 +431,7 @@ function startRecording()
     if not VB.win then showHUD() end   -- the window shows its own record state
     VB.hudTimer = hs.timer.doEvery(0.1, updateHUD)
   else
-    notify("Alferd", "Could not start the recorder (sox).")
+    notify("Alfred", "Could not start the recorder (sox).")
     VB.captureFlags = nil
   end
 end
@@ -637,7 +637,7 @@ function updateResult(text, llmFailed)
   VB.resultText = text or ""
   if not VB.win then openWindow() end
   if not VB.win then
-    notify("Alferd", llmFailed and "Copied raw transcript (LLM step failed)"
+    notify("Alfred", llmFailed and "Copied raw transcript (LLM step failed)"
                                       or "Copied to clipboard ✓")
     return
   end
@@ -684,7 +684,7 @@ function onWebMessage(message)
   end
 end
 
-local WIN_HEAD = [==[<!DOCTYPE html><html><head><meta charset="utf-8"><title>Alferd</title>
+local WIN_HEAD = [==[<!DOCTYPE html><html><head><meta charset="utf-8"><title>Alfred</title>
 <style>
  :root{color-scheme:dark;
   --text:#eceef2;--muted:#888d99;--faint:#5f636e;
@@ -755,7 +755,7 @@ local WIN_HEAD = [==[<!DOCTYPE html><html><head><meta charset="utf-8"><title>Alf
 </style></head><body>
  <div class="wrap">
   <header>
-   <div class="brand"><span>🎙️</span><span>Alferd</span></div>
+   <div class="brand"><span>🎙️</span><span>Alfred</span></div>
    <span id="state" class="pill">Ready</span>
   </header>
   <button id="rec" class="rec"><span class="rec-dot"></span><span id="reclabel">Record</span><span id="rectime" class="rec-time"></span></button>
@@ -930,10 +930,10 @@ VB.menubar = hs.menubar.new()
 VB.menubar:setTitle(ICONS.idle)
 VB.menubar:setMenu(function()
   return {
-    { title = "Alferd — " .. VB.state ..
+    { title = "Alfred — " .. VB.state ..
               (VB.backend and ("  ·  " .. VB.backend) or ""), disabled = true },
     { title = "-" },
-    { title = "Open Alferd window", fn = function() openWindow() end },
+    { title = "Open Alfred window", fn = function() openWindow() end },
     { title = "Dictate (toggle)", fn = toggleDictate },
     { title = "Dictate as…", fn = dictateWithMode },
     { title = "Type…", fn = typePrompt },
@@ -995,7 +995,7 @@ _G.voicebridgeWindow = function()
 end
 
 if not hs.fs.attributes(PYTHON) then
-  notify("Alferd", "Python venv not found. Run install.sh, then edit PYTHON in voicebridge.lua")
+  notify("Alfred", "Python venv not found. Run install.sh, then edit PYTHON in voicebridge.lua")
 end
 
-hs.alert.show("Alferd loaded — ⌘⌥D dictate · ⌘⌥I intent · ⌘⌥T type", 2)
+hs.alert.show("Alfred loaded — ⌘⌥D dictate · ⌘⌥I intent · ⌘⌥T type", 2)

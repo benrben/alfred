@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Alferd — local speech-to-text + LLM cleanup for macOS (Apple Silicon).
+Alfred — local speech-to-text + LLM cleanup for macOS (Apple Silicon).
 
 This is the *engine*. It is normally driven by the Hammerspoon front-end
 (voicebridge.lua), but every command also works standalone from a terminal.
@@ -21,9 +21,12 @@ Commands:
     voicebridge.py process <audio.wav>     transcribe + pipeline + deliver
     voicebridge.py text ["..."|-]          run pipeline on text (Type mode/tests)
     voicebridge.py history [--copy N]       list / re-copy recent results
+    voicebridge.py modes                    list rewrite modes as JSON (front-end)
+    voicebridge.py serve [--port N]         warm background engine (localhost HTTP)
     voicebridge.py doctor                   check the environment
 
 Run `voicebridge.py --help` or `voicebridge.py <cmd> --help` for flags.
+(set-intent, set-model and settings exist too; they back the front-end's menus.)
 """
 
 from __future__ import annotations
@@ -787,7 +790,7 @@ def cmd_doctor(args) -> int:
     bad = "XX "
     warn = "-- "
 
-    print("Alferd doctor\n" + "=" * 40)
+    print("Alfred doctor\n" + "=" * 40)
 
     # Python / platform
     pyv = sys.version_info
@@ -895,13 +898,13 @@ def cmd_serve(args) -> int:
         import numpy as np
         import mlx_whisper
         cfg0 = load_config(args.config)
-        sys.stderr.write("alferd: warming Whisper model…\n"); sys.stderr.flush()
+        sys.stderr.write("alfred: warming Whisper model…\n"); sys.stderr.flush()
         with contextlib.redirect_stdout(sys.stderr):
             mlx_whisper.transcribe(np.zeros(16000, dtype="float32"),
                                    path_or_hf_repo=cfg0["stt"]["model"], verbose=False)
-        sys.stderr.write("alferd: model ready.\n"); sys.stderr.flush()
+        sys.stderr.write("alfred: model ready.\n"); sys.stderr.flush()
     except Exception as e:                              # noqa: BLE001
-        sys.stderr.write(f"alferd: warm-up skipped ({e}); loads on first request.\n")
+        sys.stderr.write(f"alfred: warm-up skipped ({e}); loads on first request.\n")
 
     class Handler(BaseHTTPRequestHandler):
         def _json(self, status, obj):
@@ -934,7 +937,7 @@ def cmd_serve(args) -> int:
                     print_status("error", "runtime")
                     code = 1
                 except Exception as e:                 # noqa: BLE001
-                    sys.stderr.write(f"alferd: request failed: {e}\n")
+                    sys.stderr.write(f"alfred: request failed: {e}\n")
                     code = 1
             self._json(200, {"code": code, "out": buf.getvalue()})
 
@@ -945,10 +948,10 @@ def cmd_serve(args) -> int:
     try:
         srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     except OSError as e:
-        sys.stderr.write(f"alferd: port {port} busy ({e}); a daemon is already "
+        sys.stderr.write(f"alfred: port {port} busy ({e}); a daemon is already "
                          "running — exiting.\n")
         return 0
-    sys.stderr.write(f"alferd: serving on 127.0.0.1:{port}\n"); sys.stderr.flush()
+    sys.stderr.write(f"alfred: serving on 127.0.0.1:{port}\n"); sys.stderr.flush()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

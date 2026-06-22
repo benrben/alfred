@@ -1,4 +1,4 @@
-# VoiceBridge configuration.
+# Alfred configuration.
 # Copy this to ~/.config/voicebridge/config.toml and edit. Anything you omit
 # falls back to the built-in defaults. CLI flags override these per-run.
 
@@ -36,6 +36,10 @@ backend = "auto"
 # Aliases track the latest model and are safer than dated names.
 claude_model = "sonnet"
 codex_model = ""          # empty = codex default
+# Models offered in the front-end's dropdowns (claude defaults: opus/sonnet/haiku).
+# Add extras here to extend those lists; the active model stays claude_model/codex_model.
+# claude_models = ["opus", "sonnet", "haiku"]
+# codex_models = []
 # Extra args appended to each invocation, if you need them.
 claude_extra_args = []
 codex_extra_args = []

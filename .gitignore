@@ -1,0 +1,12 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Local config written by the installer / front-end (the tracked file is
+# config.example.toml; a real config.toml next to the script is yours).
+config.toml
+*.bak
+
+# macOS
+.DS_Store

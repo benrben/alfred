@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# VoiceBridge installer — sets up the Python environment and checks prerequisites.
+# Alfred installer — sets up the Python environment and checks prerequisites.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
-echo "VoiceBridge install"
+echo "Alfred install"
 echo "==================="
 echo "Folder: $DIR"
 echo
@@ -61,15 +61,15 @@ else
   echo "Install Homebrew (https://brew.sh), then run: brew install --cask hammerspoon"
 fi
 
-# Load the VoiceBridge front-end from Hammerspoon's config (idempotent).
+# Load the Alfred front-end from Hammerspoon's config (idempotent).
 HS_INIT="$HOME/.hammerspoon/init.lua"
-LOAD_LINE="dofile(\"$DIR/voicebridge.lua\")  -- VoiceBridge"
+LOAD_LINE="dofile(\"$DIR/voicebridge.lua\")  -- Alfred"
 mkdir -p "$(dirname "$HS_INIT")"
 if [[ -f "$HS_INIT" ]] && grep -qF "voicebridge.lua" "$HS_INIT"; then
-  echo "Hammerspoon config already loads VoiceBridge: $HS_INIT"
+  echo "Hammerspoon config already loads Alfred: $HS_INIT"
 else
   printf '%s\n' "$LOAD_LINE" >> "$HS_INIT"
-  echo "Added VoiceBridge loader to $HS_INIT"
+  echo "Added Alfred loader to $HS_INIT"
 fi
 
 # --- 6. config -------------------------------------------------------------

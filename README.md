@@ -1,4 +1,4 @@
-# VoiceBridge
+# Alfred
 
 Local speech-to-text + LLM cleanup for macOS. Press a hotkey, speak in **any
 language (Hebrew included)**, and clean text lands on your clipboard.
@@ -62,7 +62,9 @@ Check everything at once:
 - **Cmd+Option+D** — dictate (uses your config's mode). Press once to start, again to stop.
 - **Cmd+Option+I** — dictate *with intent*: pick a format first, then speak.
 - **Cmd+Option+T** — type a line and run it through the same pipeline.
-- The menu-bar icon shows state (🎙️ idle / 🔴 recording / ⏳ processing) and has a menu.
+- **Cmd+Option+V** — open the **Alfred window** (see [below](#the-alfred-window)).
+- The menu-bar icon shows state (🎙️ idle / 🔴 recording / ⏳ processing) and has a menu
+  (Open window, Dictate, Dictate as…, Type…, Backend ▸, Restart engine, Reload intent modes).
 
 While recording, a floating **HUD** shows a live `mm:ss` timer and a mic-level
 meter so you can see it's actually hearing you. When a result is ready, a small
@@ -81,6 +83,29 @@ it applies to subsequent captures on top of your config default.
 
 Change hotkeys (and toggle the level meter with `SHOW_METER`) at the top of
 `voicebridge.lua`.
+
+### The Alfred window
+
+**Cmd+Option+V** (or **Open Alfred window** from the menu) opens a panel that
+puts the whole pipeline in one place:
+
+- a **Record** button (same toggle as the hotkey) with a live level meter;
+- a **type box** — write a line and press ⏎ to run it through the pipeline;
+- **Format / intent**, **LLM backend**, and per-backend **model** dropdowns;
+- a **Translate to English** toggle;
+- an inline **Edit prompt** editor to tweak an intent's prompt and save it; and
+- the cleaned **result** (Copy / Paste) plus recent **history** (click to re-copy).
+
+Settings you change here apply to the next capture; model and intent-prompt
+edits are written back to your config.
+
+### Speed (warm engine)
+
+The front-end keeps a **warm engine** running in the background — a small
+localhost daemon (`voicebridge.py serve`) that holds the Whisper model in memory
+so each dictation skips the multi-second model load. It starts automatically and
+survives Hammerspoon reloads; if it ever wedges, choose **Restart engine (warm)**
+from the menu. (The very first run still downloads the model once.)
 
 ### From the terminal (no hotkey needed)
 
@@ -163,8 +188,10 @@ requirements.txt        Python deps
 install.sh              setup + environment check
 ```
 
-## Not in V1 (easy next steps)
+## Not yet (easy next steps)
 
-Live partial transcripts, a settings GUI, push-to-talk (hold) mode, audio
-pre-trim/VAD, and packaging as a standalone `.app`. The pipeline is already
-structured as composable stages, so adding these is incremental.
+Live partial transcripts, push-to-talk (hold) mode, audio pre-trim/VAD, and
+packaging as a standalone `.app`. (A settings GUI and a warm always-on engine,
+once on this list, now ship — see [The Alfred window](#the-alfred-window) and
+[Speed](#speed-warm-engine).) The pipeline is structured as composable stages, so
+adding the rest is incremental.
