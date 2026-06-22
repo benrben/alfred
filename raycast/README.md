@@ -18,17 +18,27 @@ model and no API key is ever involved.
   or paste any of them.
 - **Alfred Menu Bar** — shows recording state and gives quick access to the
   commands above.
+- **Engine Status** — pings the warm daemon, shows the resolved engine paths, and
+  runs the engine's `doctor`. Handy right after install.
 
 ## Setup
 
 ```bash
 cd raycast
-npm install
-npm run dev      # loads the extension into Raycast for development
+./install.sh        # installs deps, builds, and imports into Raycast
 ```
 
-`npm run dev` registers the commands in Raycast; assign hotkeys to **Dictate**
-(and any others) from Raycast → Extensions.
+This leaves a **permanent local install** — it runs at full speed; the
+"Development" label under Raycast → Extensions is just a category, and it stays
+tied to this folder. After it finishes:
+
+1. Run **Engine Status** once to confirm the engine is reachable.
+2. Assign a hotkey to **Dictate** (Raycast → select the command → `⌘K` →
+   Configure Command → Hotkey). Avoid `⌥⌘D/I/T/V` if you also run the Hammerspoon
+   front-end.
+
+To develop with hot-reload instead, run `npm install && npm run dev` and leave it
+running while you edit.
 
 ### Requirements & permissions
 

@@ -17,8 +17,8 @@ tiny CLI / localhost-HTTP contract.
 
 - **`voicebridge.py`** — the engine (STT + LLM + output). Works standalone in a terminal.
 - **`voicebridge.lua`** — the Hammerspoon front-end (global hotkeys, recording, menu bar, typed input).
-- **`raycast/`** — a Raycast extension front-end (dictate, transform text, history, menu bar).
-  See [raycast/README.md](raycast/README.md).
+- **`raycast/`** — a Raycast extension front-end (dictate, transform text, history,
+  menu bar). Install with `bash raycast/install.sh`; see [raycast/README.md](raycast/README.md).
 
 ---
 
@@ -59,6 +59,18 @@ Check everything at once:
 ```bash
 ./.venv/bin/python voicebridge.py doctor
 ```
+
+### (Optional) Raycast front-end
+
+Prefer Raycast over Hammerspoon, or want both? Install the extension:
+
+```bash
+bash raycast/install.sh
+```
+
+It installs deps, builds, and imports the extension into Raycast (dictate,
+transform text, history, menu bar, engine status). See
+[raycast/README.md](raycast/README.md) for usage and hotkeys.
 
 ## Use
 
