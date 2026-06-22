@@ -44,6 +44,14 @@ from pathlib import Path
 # Sentinel printed on stdout for the front-end to parse. Always the LAST line.
 STATUS = "VB_STATUS"
 
+# Force UTF-8 stdio even when launched by a GUI with a non-UTF-8 locale (macOS
+# can default to mac-roman, which mangles curly quotes / em dashes / Hebrew).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+    except Exception:  # pragma: no cover
+        pass
+
 # ----------------------------------------------------------------------------
 # Configuration
 # ----------------------------------------------------------------------------
@@ -243,6 +251,11 @@ def _clean_env(drop: list[str]) -> dict:
     for k in drop:
         env.pop(k, None)
     env.setdefault("NO_COLOR", "1")
+    # Force UTF-8 so the CLI emits (and we read) UTF-8 even when a GUI launcher
+    # gave us a bare/non-UTF-8 locale (macOS can default to mac-roman).
+    env.setdefault("LANG", "en_US.UTF-8")
+    env.setdefault("LC_ALL", "en_US.UTF-8")
+    env.setdefault("PYTHONUTF8", "1")
     return env
 
 
@@ -252,6 +265,7 @@ def _run(cmd: list[str], env: dict, timeout: int) -> str:
         cwd=tempfile.gettempdir(),       # neutral dir: don't scan user's project
         input="",                        # close stdin so the CLI doesn't wait on it
         capture_output=True, text=True,
+        encoding="utf-8", errors="replace",  # decode CLI output as UTF-8, not locale
     )
     if proc.returncode != 0:
         lines = [l for l in (proc.stderr or proc.stdout or "").splitlines() if l.strip()]
@@ -494,7 +508,8 @@ def _macos_tool(name: str) -> str:
 
 
 def copy_clipboard(text: str) -> None:
-    subprocess.run([_macos_tool("pbcopy")], input=text, text=True, check=True)
+    subprocess.run([_macos_tool("pbcopy")], input=text, text=True,
+                   encoding="utf-8", check=True)
 
 
 def auto_paste() -> None:

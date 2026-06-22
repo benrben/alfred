@@ -62,7 +62,16 @@ function enrichedPath(): string {
 }
 
 export function engineEnv(): NodeJS.ProcessEnv {
-  return { ...process.env, PATH: enrichedPath(), HOME: homedir() };
+  // Force a UTF-8 locale so the engine (launched by Raycast, which may have a
+  // bare locale) doesn't fall back to mac-roman and mangle curly quotes / Hebrew.
+  return {
+    ...process.env,
+    PATH: enrichedPath(),
+    HOME: homedir(),
+    LANG: process.env.LANG || "en_US.UTF-8",
+    LC_ALL: process.env.LC_ALL || "en_US.UTF-8",
+    PYTHONUTF8: "1",
+  };
 }
 
 /** Candidate locations for the engine script, best first. */

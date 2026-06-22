@@ -112,7 +112,10 @@ end
 local USER_PATH = (hs.execute('echo -n "$PATH"', true) or ""):gsub("%s+$", "")
 USER_PATH = USER_PATH .. ":/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
   .. ":" .. HOME .. "/.local/bin:" .. HOME .. "/.cargo/bin:" .. HOME .. "/.bun/bin"
-local TASK_ENV  = { PATH = USER_PATH, HOME = HOME }
+-- Force a UTF-8 locale so the engine doesn't fall back to mac-roman (which
+-- mangles curly quotes / em dashes / Hebrew) when launched from the GUI.
+local TASK_ENV  = { PATH = USER_PATH, HOME = HOME,
+                    LANG = "en_US.UTF-8", LC_ALL = "en_US.UTF-8", PYTHONUTF8 = "1" }
 local DAEMON_URL = "http://127.0.0.1:" .. DAEMON_PORT .. "/"
 
 pcall(require, "hs.ipc")   -- enables the `hs` CLI for introspection
@@ -314,7 +317,8 @@ end
 -- (keeping the Whisper model resident). Re-launching when one already runs is
 -- harmless: the new process finds the port busy and exits.
 function startDaemon()
-  hs.execute("PATH='" .. USER_PATH .. "' HOME='" .. HOME .. "' nohup '" .. PYTHON ..
+  hs.execute("PATH='" .. USER_PATH .. "' HOME='" .. HOME ..
+    "' LANG='en_US.UTF-8' LC_ALL='en_US.UTF-8' PYTHONUTF8=1 nohup '" .. PYTHON ..
     "' '" .. SCRIPT .. "' serve --port " .. DAEMON_PORT ..
     " >/tmp/alfred_daemon.log 2>&1 &")
   dbg("startDaemon: launched detached on :" .. DAEMON_PORT)
