@@ -1,0 +1,170 @@
+# VoiceBridge
+
+Local speech-to-text + LLM cleanup for macOS. Press a hotkey, speak in **any
+language (Hebrew included)**, and clean text lands on your clipboard.
+
+Everything runs on your Mac except an **optional** LLM step, which shells out to
+the `claude` or `codex` CLI **you already signed in to** — no API key is ever
+required, read, or stored.
+
+```
+hotkey → record → transcribe (mlx-whisper) → [translate → rewrite → optimize] → clipboard / file
+                                              └── optional, each toggleable ──┘
+```
+
+This is a working **V1**: two parts that talk over a tiny CLI contract.
+
+- **`voicebridge.py`** — the engine (STT + LLM + output). Works standalone in a terminal.
+- **`voicebridge.lua`** — the Hammerspoon front-end (global hotkeys, recording, menu bar, typed input).
+
+---
+
+## Requirements
+
+- Apple Silicon Mac (M1+) — required by `mlx-whisper`.
+- `python3` (3.11+ recommended), Homebrew.
+- `sox` for recording: `brew install sox`.
+- Hammerspoon for hotkeys: `brew install --cask hammerspoon`.
+- Optional, for translate/rewrite/optimize: the `claude` and/or `codex` CLI, signed in.
+
+## Install
+
+1. From this folder, run the installer (creates `.venv`, installs deps, writes a starter config):
+
+   ```bash
+   bash install.sh
+   ```
+
+2. (Optional) Sign in to an LLM CLI once — raw transcription works without this:
+
+   ```bash
+   claude         # then type /login        — Claude Code
+   codex login    # Sign in with ChatGPT    — Codex
+   ```
+
+3. Wire up the hotkeys. Open Hammerspoon once, then add to `~/.hammerspoon/init.lua`:
+
+   ```lua
+   dofile(os.getenv("HOME") .. "/Claude/Projects/alfred/voicebridge.lua")
+   ```
+
+   Choose **Reload Config** from the Hammerspoon menu. Grant **Accessibility** and
+   **Microphone** when prompted (System Settings → Privacy & Security).
+
+Check everything at once:
+
+```bash
+./.venv/bin/python voicebridge.py doctor
+```
+
+## Use
+
+- **Cmd+Option+D** — dictate (uses your config's mode). Press once to start, again to stop.
+- **Cmd+Option+I** — dictate *with intent*: pick a format first, then speak.
+- **Cmd+Option+T** — type a line and run it through the same pipeline.
+- The menu-bar icon shows state (🎙️ idle / 🔴 recording / ⏳ processing) and has a menu.
+
+While recording, a floating **HUD** shows a live `mm:ss` timer and a mic-level
+meter so you can see it's actually hearing you. When a result is ready, a small
+**panel** appears with the cleaned text and **Copy / Paste / Email / ✕** buttons
+(Paste sends it straight to the app you were in; the panel auto-dismisses after
+20s).
+
+For a one-off format override, hit **Cmd+Option+I** (or **Dictate as…** / **Type…**
+from the menu): a picker lets you choose Email, Message, Commit, Prompt, Notes,
+Cleanup-only, your own custom modes, or a pure no-LLM transcript for that capture
+— without editing your config. The picker is populated from the engine, so
+custom `[intent]` modes (see [Configure](#configure)) appear automatically.
+
+Switch the **LLM backend** live from the menu (**Backend ▸ auto / claude / codex**);
+it applies to subsequent captures on top of your config default.
+
+Change hotkeys (and toggle the level meter with `SHOW_METER`) at the top of
+`voicebridge.lua`.
+
+### From the terminal (no hotkey needed)
+
+```bash
+PY=./.venv/bin/python
+
+$PY voicebridge.py text "um so like the meeting is tuesday" --rewrite --stdout
+$PY voicebridge.py process recording.wav --translate --mode email
+$PY voicebridge.py history            # list recent results
+$PY voicebridge.py history --copy 0   # re-copy the most recent
+```
+
+Per-run flags override the config: `--translate/--no-translate`, `--rewrite`,
+`--optimize`, `--mode email|message|commit|prompt|notes|raw`, `--backend
+claude|codex`, `--model`, `--language he`, `--paste`, `--stdout`.
+
+## Configure
+
+Config lives at `~/.config/voicebridge/config.toml` (starter copied by the
+installer; see `config.example.toml` for every option). Highlights:
+
+- **Stages** (`[processing]`): `translate`, `rewrite`, `optimize` are independent
+  toggles. All off = raw transcription with **no LLM call at all**.
+- **Intent** (`mode`): how `rewrite` shapes text — `email`, `message`, `commit`,
+  `prompt`, `notes`, or `raw` (cleanup only). **Customizable:** override any
+  built-in prompt or add your own modes in an `[intent]` section — they show up
+  in the picker automatically. See `config.example.toml`; list them with
+  `voicebridge.py modes`.
+- **Backend** (`[llm] backend`): `auto` (claude, else codex), or force one.
+- **Output** (`[output]`): `copy` vs `paste`; results longer than
+  `size_threshold` chars are saved to `save_dir` and you get a notification with
+  the path instead of a clipboard dump.
+
+### Hebrew
+
+`mlx-whisper` transcribes Hebrew well. Two ways to get **English** out:
+
+- `translate_via = "llm"` (default) — Claude/Codex translates. Best quality for
+  Hebrew, keeps tone, and combines with rewrite/optimize in one pass.
+- `translate_via = "whisper"` — fully on-device via Whisper's translate task.
+  For this, set `model = "mlx-community/whisper-large-v3"` (the `-turbo` model is
+  weaker at translation).
+
+For best accuracy you can force `language = "he"` instead of `"auto"`.
+
+## How "keyless" works (and why it won't surprise-bill you)
+
+The engine spawns your own `claude`/`codex` binary and **strips the API-key
+environment variables** first (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+`CODEX_API_KEY`), so each call falls back to your subscription login instead of
+silently billing an API key. It runs `claude -p` (not `--bare`, which would
+require a key) and `codex exec --skip-git-repo-check --sandbox read-only`, both
+in a temp directory so they never touch your projects. The tool never embeds or
+reads a token — it just uses the CLI you already authenticated.
+
+> Note: provider terms cover *individual* use of *your own* login on *your own*
+> machine. Don't turn this into a shared multi-user service. Billing/limits for
+> headless CLI use change over time — check `claude` `/status` and `/usage`.
+
+## Troubleshooting
+
+- **`doctor` flags a missing piece** — follow its hint (`brew install sox`,
+  `pip install ...`, sign in to a CLI).
+- **Hotkey does nothing** — grant Hammerspoon Accessibility; confirm the
+  `dofile(...)` line and Reload Config; check the Hammerspoon console.
+- **"Could not launch the engine"** — fix the `PYTHON`/`SCRIPT`/`SOX` paths at
+  the top of `voicebridge.lua` (Hammerspoon needs absolute paths).
+- **LLM step fails** — the engine still copies the **raw transcript** so nothing
+  is lost; the notification says so. Test the CLI directly:
+  `echo hi | claude -p "reply ok"`.
+- **First run is slow** — the Whisper model downloads once, then it's cached.
+
+## Files
+
+```
+voicebridge.py          engine / CLI
+voicebridge.lua         Hammerspoon front-end
+config.example.toml     all settings, documented
+requirements.txt        Python deps
+install.sh              setup + environment check
+```
+
+## Not in V1 (easy next steps)
+
+Live partial transcripts, a settings GUI, push-to-talk (hold) mode, audio
+pre-trim/VAD, and packaging as a standalone `.app`. The pipeline is already
+structured as composable stages, so adding these is incremental.

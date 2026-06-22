@@ -1,0 +1,5 @@
+# VoiceBridge Python dependencies (Apple Silicon / macOS).
+# Installed into a local .venv by install.sh.
+mlx-whisper>=0.4.0
+soundfile>=0.12.1
+numpy>=1.24

@@ -1,0 +1,75 @@
+# VoiceBridge configuration.
+# Copy this to ~/.config/voicebridge/config.toml and edit. Anything you omit
+# falls back to the built-in defaults. CLI flags override these per-run.
+
+[stt]
+# Any mlx-community Whisper repo (auto-downloaded & cached on first use).
+#   whisper-large-v3-turbo : fast, excellent Hebrew TRANSCRIPTION (default)
+#   whisper-large-v3       : best for Whisper-native TRANSLATE (see translate_via)
+model = "mlx-community/whisper-large-v3-turbo"
+# "auto" detects the language. Force it for best accuracy, e.g. "he", "en".
+language = "auto"
+# Bias the recognizer toward names/jargon it tends to mishear, e.g.
+# "Anthropic, Hadera, Ben Reich". Leave empty to disable.
+initial_prompt = ""
+
+[processing]
+# Each stage is independent. All off = raw transcription, no LLM call at all.
+translate = false      # produce English output
+rewrite   = false      # remove fillers/false starts, fix grammar, shape to mode
+optimize  = false      # tighten & clarify
+# Rewrite target. Setting --mode on the CLI also turns rewrite on.
+#   email | message | commit | prompt | notes | raw
+mode = "raw"
+# How translation happens when translate = true:
+#   "llm"     -> Claude/Codex translates (better for Hebrew, keeps tone, 1 pass)
+#   "whisper" -> Whisper's translate task (fully on-device; English only;
+#                prefer model = whisper-large-v3 for this)
+translate_via = "llm"
+# true  = one LLM call applying all enabled stages (fast, recommended)
+# false = a separate LLM call per stage (slower; easier to debug)
+combine_stages = true
+
+[llm]
+# auto = use claude if installed, else codex. Or force "claude" / "codex".
+backend = "auto"
+# Aliases track the latest model and are safer than dated names.
+claude_model = "sonnet"
+codex_model = ""          # empty = codex default
+# Extra args appended to each invocation, if you need them.
+claude_extra_args = []
+codex_extra_args = []
+timeout = 0               # seconds per LLM call (0 = no limit; good for big prompts)
+
+[output]
+mode = "copy"                       # "copy" or "paste" (paste also copies)
+size_threshold = 0                  # chars above this are saved to a file (0 = never; always copy)
+save_dir = "~/Documents/VoiceBridge"
+save_format = "md"                  # "md" or "txt"
+keep_audio = false                  # keep the recording after transcription
+
+[history]
+enabled = true
+dir = "~/.voicebridge/history"
+max_items = 50
+
+# ---------------------------------------------------------------------------
+# Intent prompts (optional). Customize how `rewrite` shapes text per mode, and
+# add your own modes. Anything here OVERRIDES the built-ins; new keys ADD new
+# modes that show up in the front-end's format picker (Cmd+Option+I, or the
+# menu's "Dictate as…"). Run `voicebridge.py modes` to see the current list;
+# the front-end's "Reload intent modes" picks up edits without a full reload.
+#
+# Built-in modes: email, message, commit, prompt, notes, raw.
+# Each entry takes a required `prompt` and optional `label` / `description`
+# (shown in the picker). Shorthand `name = "prompt text"` also works.
+
+# Override a built-in mode's prompt:
+# [intent.email]
+# prompt = "Rewrite as a concise, friendly email in my voice. No subject line."
+
+# Add your own mode (shows up as "Standup — Daily standup"):
+# [intent.standup]
+# prompt = "Turn this into standup notes: 3 bullets — done, doing, blockers."
+# label = "Standup"
+# description = "Daily standup"
