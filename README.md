@@ -12,10 +12,13 @@ hotkey → record → transcribe (mlx-whisper) → [translate → rewrite → op
                                               └── optional, each toggleable ──┘
 ```
 
-This is a working **V1**: two parts that talk over a tiny CLI contract.
+This is a working **V1**: an engine plus pluggable front-ends that talk over a
+tiny CLI / localhost-HTTP contract.
 
 - **`voicebridge.py`** — the engine (STT + LLM + output). Works standalone in a terminal.
 - **`voicebridge.lua`** — the Hammerspoon front-end (global hotkeys, recording, menu bar, typed input).
+- **`raycast/`** — a Raycast extension front-end (dictate, transform text, history, menu bar).
+  See [raycast/README.md](raycast/README.md).
 
 ---
 
@@ -183,6 +186,7 @@ reads a token — it just uses the CLI you already authenticated.
 ```
 voicebridge.py          engine / CLI
 voicebridge.lua         Hammerspoon front-end
+raycast/                Raycast extension (second front-end)
 config.example.toml     all settings, documented
 requirements.txt        Python deps
 install.sh              setup + environment check

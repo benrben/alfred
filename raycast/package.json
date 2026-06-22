@@ -1,0 +1,136 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "alfred-voice",
+  "title": "Alfred — Voice & Text",
+  "description": "Local speech-to-text + LLM cleanup. Dictate, transform selected text, and browse history via the Alfred engine — talks to the warm daemon, no API key.",
+  "icon": "extension-icon.png",
+  "author": "benrben",
+  "categories": ["Productivity"],
+  "license": "MIT",
+  "commands": [
+    {
+      "name": "dictate",
+      "title": "Dictate (Toggle)",
+      "subtitle": "Alfred",
+      "description": "Start recording; run again to stop and process. Bind a hotkey for push-to-talk style capture.",
+      "mode": "no-view"
+    },
+    {
+      "name": "transform-text",
+      "title": "Transform Text",
+      "subtitle": "Alfred",
+      "description": "Clean up / reshape the selected text or clipboard through the Alfred pipeline.",
+      "mode": "view"
+    },
+    {
+      "name": "type-and-process",
+      "title": "Type & Process",
+      "subtitle": "Alfred",
+      "description": "Type a line and run it through the Alfred pipeline.",
+      "mode": "view"
+    },
+    {
+      "name": "history",
+      "title": "History",
+      "subtitle": "Alfred",
+      "description": "Browse recent Alfred results; copy or paste any of them.",
+      "mode": "view"
+    },
+    {
+      "name": "menubar",
+      "title": "Alfred Menu Bar",
+      "subtitle": "Alfred",
+      "description": "Menu-bar control: recording state plus quick access to dictate, transform, and history.",
+      "mode": "menu-bar",
+      "interval": "1m"
+    }
+  ],
+  "preferences": [
+    {
+      "name": "daemonPort",
+      "title": "Daemon Port",
+      "description": "Port of the warm engine (voicebridge.py serve). Must match the front-end.",
+      "type": "textfield",
+      "required": false,
+      "default": "8763"
+    },
+    {
+      "name": "backend",
+      "title": "LLM Backend",
+      "description": "Override the config's backend for every capture.",
+      "type": "dropdown",
+      "required": false,
+      "default": "default",
+      "data": [
+        { "title": "Default (config)", "value": "default" },
+        { "title": "auto", "value": "auto" },
+        { "title": "claude", "value": "claude" },
+        { "title": "codex", "value": "codex" }
+      ]
+    },
+    {
+      "name": "defaultMode",
+      "title": "Default Format",
+      "description": "Default rewrite mode (email|message|commit|prompt|notes|raw or a custom one). Leave empty to use your config.",
+      "type": "textfield",
+      "required": false,
+      "default": ""
+    },
+    {
+      "name": "translate",
+      "title": "Translate",
+      "description": "Translate output to English.",
+      "type": "dropdown",
+      "required": false,
+      "default": "default",
+      "data": [
+        { "title": "Default (config)", "value": "default" },
+        { "title": "On", "value": "on" },
+        { "title": "Off", "value": "off" }
+      ]
+    },
+    {
+      "name": "pythonBin",
+      "title": "Python (venv)",
+      "description": "Path to the engine's venv python — only used to start the daemon or fall back when it's down.",
+      "type": "textfield",
+      "required": false,
+      "default": "~/Claude/Projects/alfred/.venv/bin/python3"
+    },
+    {
+      "name": "engineScript",
+      "title": "Engine Script",
+      "description": "Path to voicebridge.py.",
+      "type": "textfield",
+      "required": false,
+      "default": "~/Claude/Projects/alfred/voicebridge.py"
+    },
+    {
+      "name": "soxBin",
+      "title": "sox Path",
+      "description": "Path to the sox recorder (used by Dictate).",
+      "type": "textfield",
+      "required": false,
+      "default": "/opt/homebrew/bin/sox"
+    }
+  ],
+  "dependencies": {
+    "@raycast/api": "^1.80.0",
+    "@raycast/utils": "^1.17.0"
+  },
+  "devDependencies": {
+    "@raycast/eslint-config": "^1.0.11",
+    "@types/node": "22.19.17",
+    "@types/react": "19.0.10",
+    "eslint": "^8.57.0",
+    "prettier": "^3.3.3",
+    "typescript": "^5.5.4"
+  },
+  "scripts": {
+    "build": "ray build -e dist",
+    "dev": "ray develop",
+    "lint": "ray lint",
+    "fix-lint": "ray lint --fix",
+    "typecheck": "tsc --noEmit"
+  }
+}

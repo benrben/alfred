@@ -1,0 +1,7 @@
+# Raycast extension build artifacts & deps
+node_modules/
+dist/
+.raycast-swift-build/
+raycast-env.d.ts
+*.tsbuildinfo
+.DS_Store
