@@ -312,9 +312,36 @@ def _strip_wrapping(text: str) -> str:
 # Processing stages  (composable, independently toggleable)
 # ----------------------------------------------------------------------------
 
-# Built-in rewrite "intents". Each maps a mode -> guidance appended to the
-# rewrite instruction. Override any prompt/label, or add your own modes, via the
-# [intent] section in config.toml (see mode_catalog / config.example.toml).
+# A full, standalone rewrite instruction (used by a mode with "replace": True, so
+# it stands in for the cleanup _REWRITE rather than being appended to it).
+_PROMPT_OPTIMIZER = """\
+You are a prompt optimizer. Given any user input, automatically rewrite it into a
+clear, effective prompt. Never ask follow-up questions — infer everything from the
+input alone and preserve the user's full original intent (every requirement, entity,
+constraint, and nuance must survive the rewrite; never add goals they didn't imply).
+
+INTERNAL STEPS (do not show these):
+1. Deconstruct: extract the core intent, key entities, context, output requirements,
+   and constraints. Map what's stated vs. merely implied.
+2. Develop: silently classify the request type and apply the fitting approach —
+   - Creative → multi-perspective, tone emphasis
+   - Technical → constraint-based, precision focus
+   - Educational → clear structure, examples
+   - Complex → step-by-step reasoning, systematic framing
+   Add a role/expertise framing and logical structure where it helps.
+3. Auto-detect level:
+   - SHORT → simple, single-step, or clear requests. Output a tight one-paragraph
+     prompt with no scaffolding.
+   - DETAILED → complex, professional, or multi-part requests. Output a structured
+     prompt with role, context, task breakdown, and explicit output format.
+
+OUTPUT:
+Return only the rewritten prompt — no preamble, no explanation of changes, no questions."""
+
+# Built-in rewrite "intents". A mode's prompt is appended to the cleanup rewrite
+# instruction, UNLESS it sets "replace": True (then its prompt is used wholesale).
+# Override any prompt/label, or add your own modes, via the [intent] section in
+# config.toml (see mode_catalog / config.example.toml).
 BUILTIN_MODES = [
     {"key": "email", "label": "Email", "description": "Polished email",
      "prompt": "Shape it as the body of a clear, courteous email. Do not invent a "
@@ -324,9 +351,9 @@ BUILTIN_MODES = [
     {"key": "commit", "label": "Commit", "description": "Git commit message",
      "prompt": "Shape it as a git commit message: a short imperative summary line "
                "(<=72 chars), then a blank line, then bullet points if warranted."},
-    {"key": "prompt", "label": "Prompt", "description": "Prompt for an AI",
-     "prompt": "Shape it as a clear, well-structured instruction/prompt for an AI "
-               "assistant."},
+    {"key": "prompt", "label": "Prompt Optimizer",
+     "description": "Rewrite input into an optimized AI prompt",
+     "prompt": _PROMPT_OPTIMIZER, "replace": True},
     {"key": "notes", "label": "Notes", "description": "Clean notes / bullets",
      "prompt": "Shape it as clean, organized notes (short paragraphs or bullets)."},
     {"key": "raw", "label": "Cleanup only", "description": "Tidy wording, keep structure",
@@ -347,8 +374,10 @@ def mode_catalog(cfg: dict) -> list[dict]:
             if not isinstance(spec, dict):       # shorthand: key = "prompt text"
                 spec = {"prompt": str(spec)}
             entry = by_key.get(key) or {"key": key, "label": key.capitalize(),
-                                        "description": "", "prompt": ""}
-            entry.update({k: spec[k] for k in ("prompt", "label", "description")
+                                        "description": "", "prompt": "",
+                                        "replace": False}
+            entry.update({k: spec[k] for k in
+                          ("prompt", "label", "description", "replace")
                           if k in spec})
             entry["key"] = key
             if key not in by_key:
@@ -390,15 +419,24 @@ def active_stages(cfg: dict) -> dict:
     }
 
 
-def build_combined_prompt(stages: dict, guidance: str, text: str) -> str:
+def rewrite_instruction(cfg: dict) -> str:
+    """The instruction for the rewrite stage: a mode's prompt appended to the
+    cleanup _REWRITE, unless the mode is a 'replace' mode (then its prompt is
+    used wholesale, e.g. the Prompt Optimizer)."""
+    mode = cfg["processing"]["mode"]
+    entry = next((m for m in mode_catalog(cfg) if m["key"] == mode), None)
+    guidance = (entry or {}).get("prompt", "")
+    if entry and entry.get("replace") and guidance:
+        return guidance
+    return f"{_REWRITE} {guidance}" if guidance else _REWRITE
+
+
+def build_combined_prompt(stages: dict, rewrite_instr: str, text: str) -> str:
     steps = []
     if stages["translate"]:
         steps.append(_TRANSLATE)
     if stages["rewrite"]:
-        r = _REWRITE
-        if guidance:
-            r = f"{r} {guidance}"
-        steps.append(r)
+        steps.append(rewrite_instr)
     if stages["optimize"]:
         steps.append(_OPTIMIZE)
     numbered = "\n".join(f"{i}. {s}" for i, s in enumerate(steps, 1))
@@ -409,15 +447,13 @@ def build_combined_prompt(stages: dict, guidance: str, text: str) -> str:
     )
 
 
-def single_stage_prompt(kind: str, guidance: str, text: str) -> str:
+def single_stage_prompt(kind: str, rewrite_instr: str, text: str) -> str:
     if kind == "translate":
         instr = _TRANSLATE
     elif kind == "optimize":
         instr = _OPTIMIZE
     else:
-        instr = _REWRITE
-        if guidance:
-            instr = f"{instr} {guidance}"
+        instr = rewrite_instr
     return f"{instr}\n\n{_TAIL}\n\nINPUT TEXT:\n{text}"
 
 
@@ -430,16 +466,16 @@ def process_text(text: str, cfg: dict) -> str:
         return text  # nothing enabled -> pass through, no LLM call
 
     backends = candidate_backends(cfg)
-    guidance = mode_prompt(cfg, cfg["processing"]["mode"])
+    rewrite_instr = rewrite_instruction(cfg)
 
     if cfg["processing"]["combine_stages"]:
-        prompt = build_combined_prompt(stages, guidance, text)
+        prompt = build_combined_prompt(stages, rewrite_instr, text)
         return run_llm_fallback(backends, prompt, cfg) or text
 
     out = text
     for kind in ("translate", "rewrite", "optimize"):
         if stages[kind]:
-            prompt = single_stage_prompt(kind, guidance, out)
+            prompt = single_stage_prompt(kind, rewrite_instr, out)
             out = run_llm_fallback(backends, prompt, cfg) or out
     return out
 

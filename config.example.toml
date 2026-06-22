@@ -15,12 +15,16 @@ initial_prompt = ""
 
 [processing]
 # Each stage is independent. All off = raw transcription, no LLM call at all.
+# Default below = the Prompt Optimizer (rewrite on, mode "prompt"); set
+# rewrite = false (or pick a no-AI capture in a front-end) for a pure transcript.
 translate = false      # produce English output
-rewrite   = false      # remove fillers/false starts, fix grammar, shape to mode
+rewrite   = true       # remove fillers/false starts, fix grammar, shape to mode
 optimize  = false      # tighten & clarify
 # Rewrite target. Setting --mode on the CLI also turns rewrite on.
-#   email | message | commit | prompt | notes | raw
-mode = "raw"
+#   prompt   -> Prompt Optimizer (rewrites input into an optimized AI prompt)
+#   email | message | commit | notes -> shape to that format
+#   raw      -> cleanup only (fix fillers/grammar, keep structure)
+mode = "prompt"
 # How translation happens when translate = true:
 #   "llm"     -> Claude/Codex translates (better for Hebrew, keeps tone, 1 pass)
 #   "whisper" -> Whisper's translate task (fully on-device; English only;
@@ -64,9 +68,14 @@ max_items = 50
 # menu's "Dictate as…"). Run `voicebridge.py modes` to see the current list;
 # the front-end's "Reload intent modes" picks up edits without a full reload.
 #
-# Built-in modes: email, message, commit, prompt, notes, raw.
+# Built-in modes: prompt (Prompt Optimizer), email, message, commit, notes, raw.
 # Each entry takes a required `prompt` and optional `label` / `description`
 # (shown in the picker). Shorthand `name = "prompt text"` also works.
+#
+# `replace = true` makes `prompt` the ENTIRE rewrite instruction instead of being
+# appended to the built-in cleanup ("remove fillers, fix grammar, keep tone").
+# Use it for standalone instructions like the Prompt Optimizer; the built-in
+# "prompt" mode already does this.
 
 # Override a built-in mode's prompt:
 # [intent.email]
@@ -77,3 +86,9 @@ max_items = 50
 # prompt = "Turn this into standup notes: 3 bullets — done, doing, blockers."
 # label = "Standup"
 # description = "Daily standup"
+
+# A standalone instruction that replaces the cleanup rewrite entirely:
+# [intent.translate-formal]
+# prompt = "Translate to formal English. Output only the translation."
+# label = "Formal EN"
+# replace = true

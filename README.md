@@ -144,11 +144,14 @@ Config lives at `~/.config/voicebridge/config.toml` (starter copied by the
 installer; see `config.example.toml` for every option). Highlights:
 
 - **Stages** (`[processing]`): `translate`, `rewrite`, `optimize` are independent
-  toggles. All off = raw transcription with **no LLM call at all**.
-- **Intent** (`mode`): how `rewrite` shapes text — `email`, `message`, `commit`,
-  `prompt`, `notes`, or `raw` (cleanup only). **Customizable:** override any
-  built-in prompt or add your own modes in an `[intent]` section — they show up
-  in the picker automatically. See `config.example.toml`; list them with
+  toggles. All off = raw transcription with **no LLM call at all**. The shipped
+  default turns `rewrite` on with `mode = "prompt"` (the **Prompt Optimizer**).
+- **Intent** (`mode`): how `rewrite` shapes text — `prompt` (the **Prompt
+  Optimizer**: rewrites your input into an optimized AI prompt), `email`,
+  `message`, `commit`, `notes`, or `raw` (cleanup only). **Customizable:** override
+  any built-in prompt or add your own modes in an `[intent]` section; add
+  `replace = true` to use your prompt as the *whole* rewrite instruction instead
+  of appending to the cleanup. See `config.example.toml`; list them with
   `voicebridge.py modes`.
 - **Backend** (`[llm] backend`): `auto` (claude, else codex), or force one.
 - **Output** (`[output]`): `copy` vs `paste`; results longer than

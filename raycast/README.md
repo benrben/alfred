@@ -9,11 +9,12 @@ model and no API key is ever involved.
 ## Formats (where Claude comes in)
 
 Every capture runs through a **format**. **Raw transcript** does **no AI** — it's
-exactly what you said. Every other format (**Cleanup only**, **Email**,
-**Message**, **Commit**, **Prompt**, **Notes**, or your own) runs Claude/Codex to
-clean up and reshape the text. The pickers default to your configured default,
-which you set — and see — in **Manage Intents**. If output looks word-for-word,
-the active format is **Raw**; switch it (or change the default).
+exactly what you said. Every other format runs Claude/Codex: **Prompt Optimizer**
+(the shipped default — rewrites your input into an optimized AI prompt),
+**Cleanup only**, **Email**, **Message**, **Commit**, **Notes**, or your own. The
+pickers default to **Default (config)**, which uses whatever you've set in
+**Manage Intents** (where the default is starred). Want the untouched words? Pick
+**Raw transcript** for that capture.
 
 ## Commands
 
