@@ -316,6 +316,7 @@ export interface RecState {
   pid: number;
   wav: string;
   startedAt: number;
+  meter?: string; // file sox's -S VU meter is written to (for the live level bar)
 }
 
 function recStateFile(): string {

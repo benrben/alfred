@@ -10,10 +10,10 @@
   "commands": [
     {
       "name": "dictate",
-      "title": "Dictate (Toggle)",
+      "title": "Dictate",
       "subtitle": "Alfred",
-      "description": "Start recording; run again to stop and process. Bind a hotkey for push-to-talk style capture.",
-      "mode": "no-view"
+      "description": "Record with a live timer + mic level, then stop to transcribe and clean up. Bind a hotkey.",
+      "mode": "view"
     },
     {
       "name": "transform-text",

@@ -1,6 +1,10 @@
 import { Icon, LaunchType, MenuBarExtra, launchCommand } from "@raycast/api";
 import { isAlive, readRecState } from "./lib/engine";
 
+function open(name: string) {
+  return () => launchCommand({ name, type: LaunchType.UserInitiated });
+}
+
 export default function MenuBar() {
   const state = readRecState();
   const recording = !!state && isAlive(state.pid);
@@ -9,41 +13,34 @@ export default function MenuBar() {
     <MenuBarExtra
       icon={recording ? Icon.CircleFilled : Icon.Microphone}
       title={recording ? "🔴" : ""}
+      tooltip="Alfred"
     >
       <MenuBarExtra.Item
-        title={recording ? "Stop & Process" : "Start Dictation"}
+        title={recording ? "Stop Recording…" : "Dictate"}
         icon={recording ? Icon.Stop : Icon.Microphone}
-        onAction={() =>
-          launchCommand({ name: "dictate", type: LaunchType.Background })
-        }
+        onAction={open("dictate")}
       />
       <MenuBarExtra.Separator />
       <MenuBarExtra.Item
         title="Transform Text"
         icon={Icon.Wand}
-        onAction={() =>
-          launchCommand({
-            name: "transform-text",
-            type: LaunchType.UserInitiated,
-          })
-        }
+        onAction={open("transform-text")}
       />
       <MenuBarExtra.Item
         title="Type & Process"
         icon={Icon.Pencil}
-        onAction={() =>
-          launchCommand({
-            name: "type-and-process",
-            type: LaunchType.UserInitiated,
-          })
-        }
+        onAction={open("type-and-process")}
       />
       <MenuBarExtra.Item
         title="History"
         icon={Icon.Clock}
-        onAction={() =>
-          launchCommand({ name: "history", type: LaunchType.UserInitiated })
-        }
+        onAction={open("history")}
+      />
+      <MenuBarExtra.Separator />
+      <MenuBarExtra.Item
+        title="Engine Status"
+        icon={Icon.Heartbeat}
+        onAction={open("engine-status")}
       />
     </MenuBarExtra>
   );
