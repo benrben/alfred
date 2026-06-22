@@ -8,9 +8,10 @@ model and no API key is ever involved.
 
 ## Commands
 
-- **Dictate (Toggle)** — run once to start recording (via `sox`), run again to
-  stop and process. Bind a Raycast hotkey for push-to-talk-style capture. Result
-  lands on the clipboard.
+- **Dictate** — opens a live recorder (via `sox`): a running timer and a mic-level
+  bar, with **⏎** to stop & transcribe, then Paste/Copy the transcript inline.
+  **⌃C** cancels; **Esc** keeps recording in the background and reopening Dictate
+  re-adopts that take. Bind a Raycast hotkey to it.
 - **Transform Text** — prefilled from the current selection (or clipboard): edit,
   pick a format, run, then Copy/Paste the cleaned result back.
 - **Type & Process** — type a line and run it through the pipeline.
@@ -70,7 +71,7 @@ outcome, mirroring the Hammerspoon front-end.
 
 ## Not handled here
 
-Raycast has no audio-capture API and no floating HUD, so there's no live
-mic-level meter during dictation (the Hammerspoon front-end has that). Everything
-else — formats, backends, models, translate, history — is shared through the
-engine.
+Raycast can't show a *system-wide* floating HUD like the Hammerspoon front-end —
+the live timer and mic-level bar live inside the Dictate window rather than
+floating over every app. Everything else — formats, backends, models, translate,
+history — is shared through the engine.
