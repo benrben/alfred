@@ -38,10 +38,16 @@ pickers default to **Default (config)**, which uses whatever you've set in
 
 ```bash
 cd raycast
-./install.sh        # installs deps, builds, and imports into Raycast
+./install.sh        # 0 → 100: engine venv + Whisper deps, sox, config, build & import
 ```
 
-This leaves a **permanent local install** — it runs at full speed; the
+This is the **all-in-one** path — it sets up the engine (a Python `.venv` beside
+`voicebridge.py` with `mlx-whisper`), installs `sox`, writes a starter
+`config.toml` if you don't have one, then builds and imports the extension. It's
+idempotent, so re-run it any time. (It does **not** install Hammerspoon; run the
+[root `install.sh`](../install.sh) if you also want that front-end.)
+
+It leaves a **permanent local install** — it runs at full speed; the
 "Development" label under Raycast → Extensions is just a category, and it stays
 tied to this folder. After it finishes:
 
@@ -55,12 +61,14 @@ running while you edit.
 
 ### Requirements & permissions
 
-- The Alfred engine installed and working (see the [root README](../README.md));
-  run `voicebridge.py doctor` once.
+`install.sh` handles the engine venv, Whisper deps, `sox`, and config for you.
+The two things it **can't** do, which you must grant once:
+
+- **Apple Silicon + Python 3.11+** and **Homebrew** (for `sox`) — the script
+  errors out early if these are missing.
 - **Microphone access for Raycast** — Dictate shells out to `sox -d`, which
   records through Raycast's process. Grant it in System Settings → Privacy &
   Security → Microphone the first time.
-- `sox` on `PATH` (`brew install sox`).
 
 ### Preferences
 

@@ -256,6 +256,19 @@ def _clean_env(drop: list[str]) -> dict:
     env.setdefault("LANG", "en_US.UTF-8")
     env.setdefault("LC_ALL", "en_US.UTF-8")
     env.setdefault("PYTHONUTF8", "1")
+    # claude/codex read their OAuth login from the macOS Keychain, whose lookup
+    # needs the user identity in the env. GUI launchers (Raycast, Hammerspoon)
+    # can spawn us without USER set, in which case claude reports "Not logged in"
+    # and the whole LLM step fails. Backfill it from the OS so we don't depend on
+    # the launcher's environment.
+    if not env.get("USER"):
+        try:
+            import pwd
+            env["USER"] = pwd.getpwuid(os.getuid()).pw_name
+        except Exception:                          # noqa: BLE001
+            pass
+    if env.get("USER"):
+        env.setdefault("LOGNAME", env["USER"])
     return env
 
 
@@ -508,8 +521,16 @@ def _macos_tool(name: str) -> str:
 
 
 def copy_clipboard(text: str) -> None:
+    # We hand pbcopy UTF-8 bytes, but pbcopy decodes its stdin using the locale
+    # (LANG / __CF_USER_TEXT_ENCODING). A GUI launcher (Raycast/Hammerspoon) can
+    # spawn us with no/!UTF-8 locale, in which case pbcopy reads our UTF-8 as
+    # Mac Roman and the clipboard gets mojibake (Hebrew -> "◊©◊ú◊ï◊ù"). Force a
+    # UTF-8 locale for pbcopy so it always matches the bytes we send.
+    env = os.environ.copy()
+    env["LANG"] = "en_US.UTF-8"
+    env["LC_ALL"] = "en_US.UTF-8"
     subprocess.run([_macos_tool("pbcopy")], input=text, text=True,
-                   encoding="utf-8", check=True)
+                   encoding="utf-8", env=env, check=True)
 
 
 def auto_paste() -> None:

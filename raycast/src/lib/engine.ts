@@ -20,7 +20,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 
 export interface Preferences {
@@ -62,12 +62,22 @@ function enrichedPath(): string {
 }
 
 export function engineEnv(): NodeJS.ProcessEnv {
-  // Force a UTF-8 locale so the engine (launched by Raycast, which may have a
-  // bare locale) doesn't fall back to mac-roman and mangle curly quotes / Hebrew.
+  // Raycast launches us with a trimmed environment. Restore what the engine and
+  // the claude/codex it spawns need:
+  //  - PATH: so the CLIs resolve by name (Raycast's PATH is minimal).
+  //  - HOME: so claude/codex find ~/.claude, ~/.codex.
+  //  - USER/LOGNAME: claude/codex read their OAuth login from the macOS Keychain,
+  //    and the Keychain lookup needs the user identity in the env — without it
+  //    claude reports "Not logged in" and the LLM step fails.
+  //  - LANG/LC_ALL: force UTF-8 so a bare locale doesn't mangle curly quotes /
+  //    Hebrew into mac-roman.
+  const user = process.env.USER || userInfo().username;
   return {
     ...process.env,
     PATH: enrichedPath(),
     HOME: homedir(),
+    USER: user,
+    LOGNAME: process.env.LOGNAME || user,
     LANG: process.env.LANG || "en_US.UTF-8",
     LC_ALL: process.env.LC_ALL || "en_US.UTF-8",
     PYTHONUTF8: "1",
