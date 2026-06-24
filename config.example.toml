@@ -48,6 +48,18 @@ codex_model = ""          # empty = codex default
 claude_extra_args = []
 codex_extra_args = []
 timeout = 0               # seconds per LLM call (0 = no limit; good for big prompts)
+# Speed knobs ---------------------------------------------------------------
+# fast: run the LLM in an isolated, minimal mode for the text transform — skip
+#   your MCP servers, plugins, hooks, CLAUDE.md and settings (pure startup
+#   overhead here, and a correctness risk). Big win with many MCP servers.
+fast = true
+# warm: in the daemon (serve), keep ONE claude process alive and stream each
+#   transform to it, so the ~3s CLI startup is paid once, not per capture
+#   (warm turns ~1.5-2s vs ~5s cold). Keyless — still the CLI login. Each
+#   transform is self-contained, so turns stay independent.
+warm = true
+warm_max_turns = 25       # recycle the warm process after N turns (bounds context)
+warm_idle_secs = 600      # recycle the warm process after this many idle seconds
 
 [output]
 mode = "copy"                       # "copy" or "paste" (paste also copies)

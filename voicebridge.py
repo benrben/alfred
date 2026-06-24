@@ -35,10 +35,13 @@ import argparse
 import datetime as _dt
 import json
 import os
+import queue
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 # Sentinel printed on stdout for the front-end to parse. Always the LAST line.
@@ -79,6 +82,21 @@ DEFAULTS: dict = {
         "claude_extra_args": [],
         "codex_extra_args": [],
         "timeout": 120,              # seconds per LLM call
+        # Speed: run claude/codex in an isolated, minimal mode for the text
+        # transform — skip the user's MCP servers, plugins, hooks, CLAUDE.md and
+        # settings. These are pure startup overhead here (and a correctness risk:
+        # a stray CLAUDE.md/hook could alter the rewrite). Big win when the user
+        # has many MCP servers. Set false to use the full environment.
+        "fast": True,
+        # Speed: in the daemon, keep one warm `claude` process alive and stream
+        # each transform to it, so we pay the ~3s CLI startup once instead of per
+        # capture (warm turns ~2s vs ~5s cold). Keyless (still the CLI login).
+        # Each transform is self-contained, so turns stay independent. Only used
+        # by `serve`; one-shot CLI runs always spawn fresh.
+        "warm": True,
+        "warm_max_turns": 25,        # recycle the process after N turns (bounds
+                                     # context growth / memory)
+        "warm_idle_secs": 600,       # recycle after this many idle seconds
     },
     "output": {
         "mode": "copy",              # "copy" or "paste" (paste also copies)
@@ -291,16 +309,181 @@ def _run(cmd: list[str], env: dict, timeout: int) -> str:
     return (proc.stdout or "").strip()
 
 
+# Set True by `serve` so run_llm knows it may keep a warm process alive. One-shot
+# CLI runs leave this False (a warm process would never be reused).
+_DAEMON_MODE = False
+
+
+def _claude_warm_cmd(cfg: dict) -> list[str]:
+    """The claude command for a persistent stream-json session (no prompt arg —
+    prompts are sent as messages over stdin)."""
+    cmd = [find_tool("claude") or "claude", "-p",
+           "--input-format", "stream-json",
+           "--output-format", "stream-json", "--verbose"]
+    if cfg["llm"].get("claude_model"):
+        cmd += ["--model", cfg["llm"]["claude_model"]]
+    if cfg["llm"].get("fast", True):
+        cmd += ["--strict-mcp-config", "--setting-sources", ""]
+    cmd += list(cfg["llm"].get("claude_extra_args") or [])
+    return cmd
+
+
+class WarmClaude:
+    """A long-lived `claude` process fed prompts over a stream-json pipe, so the
+    ~3s CLI startup is paid once instead of per call. Single-flight (serialized
+    by a lock); recycles the process after N turns / idle / on any error. The
+    caller falls back to a one-shot run if a turn fails."""
+
+    def __init__(self, cmd: list[str], env: dict, max_turns: int, idle_secs: int):
+        self.cmd, self.env = cmd, env
+        self.max_turns, self.idle_secs = max_turns, idle_secs
+        self._proc: subprocess.Popen | None = None
+        self._q: queue.Queue = queue.Queue()
+        self._turns = 0
+        self._last = 0.0
+        self._lock = threading.Lock()
+
+    def _alive(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def _stop(self) -> None:
+        p, self._proc = self._proc, None
+        if not p:
+            return
+        for step in (lambda: p.stdin and p.stdin.close(), p.terminate, p.kill):
+            try:
+                step()
+            except Exception:                       # noqa: BLE001
+                pass
+
+    def _start(self) -> None:
+        self._stop()
+        self._q = queue.Queue()
+        p = subprocess.Popen(
+            self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, encoding="utf-8",
+            errors="replace", bufsize=1, env=self.env,
+            cwd=tempfile.gettempdir(),
+        )
+        self._proc = p
+        q = self._q
+
+        def pump_out():
+            try:
+                for line in p.stdout:
+                    q.put(line)
+            except Exception:                       # noqa: BLE001
+                pass
+            q.put(None)                             # sentinel: stream closed
+
+        def drain_err():
+            try:
+                for _ in p.stderr:                  # keep the pipe from filling
+                    pass
+            except Exception:                       # noqa: BLE001
+                pass
+
+        threading.Thread(target=pump_out, daemon=True).start()
+        threading.Thread(target=drain_err, daemon=True).start()
+        self._turns = 0
+
+    def ask(self, prompt: str, timeout: float | None) -> str:
+        with self._lock:
+            stale = (self._last and time.monotonic() - self._last > self.idle_secs)
+            if not self._alive() or self._turns >= self.max_turns or stale:
+                self._start()
+            # Drop anything left over from a prior turn before sending ours.
+            try:
+                while True:
+                    self._q.get_nowait()
+            except queue.Empty:
+                pass
+            msg = {"type": "user",
+                   "message": {"role": "user", "content": prompt}}
+            try:
+                self._proc.stdin.write(json.dumps(msg) + "\n")
+                self._proc.stdin.flush()
+            except Exception as e:                  # noqa: BLE001
+                self._stop()
+                raise RuntimeError(f"warm claude write failed: {e}")
+            deadline = time.monotonic() + (timeout or 120)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._stop()
+                    raise RuntimeError("warm claude timed out")
+                try:
+                    line = self._q.get(timeout=remaining)
+                except queue.Empty:
+                    self._stop()
+                    raise RuntimeError("warm claude timed out")
+                if line is None:
+                    self._stop()
+                    raise RuntimeError("warm claude exited")
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:                   # noqa: BLE001
+                    continue
+                if obj.get("type") != "result":
+                    continue
+                self._turns += 1
+                self._last = time.monotonic()
+                if obj.get("is_error") or obj.get("subtype") not in (None, "success"):
+                    self._stop()
+                    raise RuntimeError(f"warm claude error: {obj.get('subtype')}")
+                out = (obj.get("result") or "").strip()
+                if not out:
+                    raise RuntimeError("warm claude returned empty")
+                return out
+
+
+_WARM: WarmClaude | None = None
+_WARM_SIG: tuple | None = None
+_WARM_LOCK = threading.Lock()
+
+
+def _get_warm(cfg: dict, env: dict) -> WarmClaude | None:
+    """The shared warm-claude session, or None when warm mode doesn't apply
+    (not the daemon, or disabled). Rebuilt if the relevant config changes."""
+    global _WARM, _WARM_SIG
+    if not _DAEMON_MODE or not cfg["llm"].get("warm", True):
+        return None
+    cmd = _claude_warm_cmd(cfg)
+    sig = (tuple(cmd), int(cfg["llm"].get("warm_max_turns", 25)),
+           int(cfg["llm"].get("warm_idle_secs", 600)))
+    with _WARM_LOCK:
+        if _WARM is None or _WARM_SIG != sig:
+            if _WARM is not None:
+                _WARM._stop()
+            _WARM = WarmClaude(cmd, env, sig[1], sig[2])
+            _WARM_SIG = sig
+        return _WARM
+
+
 def run_llm(backend: str, prompt: str, cfg: dict) -> str:
     _t = int(cfg["llm"]["timeout"])
     timeout = _t if _t > 0 else None             # 0 = no timeout (big prompts)
     if backend == "claude":
+        # Strip API-key vars so claude uses the subscription OAuth login.
+        env = _clean_env(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"])
+        warm = _get_warm(cfg, env)
+        if warm is not None:
+            try:
+                return _strip_wrapping(warm.ask(prompt, timeout))
+            except Exception as e:                  # noqa: BLE001
+                sys.stderr.write(f"warning: warm claude failed ({e}); "
+                                 "one-shot fallback.\n")
         cmd = [find_tool("claude") or "claude", "-p", prompt]
         if cfg["llm"].get("claude_model"):
             cmd += ["--model", cfg["llm"]["claude_model"]]
+        if cfg["llm"].get("fast", True):
+            # Skip the user's MCP servers, plugins, hooks, CLAUDE.md and settings:
+            # pure startup overhead for a one-shot text transform.
+            cmd += ["--strict-mcp-config", "--setting-sources", ""]
         cmd += list(cfg["llm"].get("claude_extra_args") or [])
-        # Strip API-key vars so claude uses the subscription OAuth login.
-        env = _clean_env(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"])
         return run_llm_clean(cmd, env, timeout)
     if backend == "codex":
         cmd = [find_tool("codex") or "codex", "exec", "--skip-git-repo-check",
@@ -988,9 +1171,13 @@ def cmd_serve(args) -> int:
     import contextlib
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+    global _DAEMON_MODE
+    _DAEMON_MODE = True                              # allow a warm claude session
+
     parser = build_parser()
 
     # Warm the model now (mlx-whisper caches it for the life of the process).
+    cfg0 = None
     try:
         import numpy as np
         import mlx_whisper
@@ -1002,6 +1189,21 @@ def cmd_serve(args) -> int:
         sys.stderr.write("alfred: model ready.\n"); sys.stderr.flush()
     except Exception as e:                              # noqa: BLE001
         sys.stderr.write(f"alfred: warm-up skipped ({e}); loads on first request.\n")
+
+    # Pre-warm the claude session in the background so the first capture is fast
+    # too (it pays the ~3s CLI startup now, off the critical path).
+    def _prewarm():
+        try:
+            cfg = cfg0 if cfg0 is not None else load_config(args.config)
+            if cfg["llm"].get("warm", True) and cfg["llm"]["backend"] != "codex":
+                warm = _get_warm(cfg, _clean_env(["ANTHROPIC_API_KEY",
+                                                  "ANTHROPIC_AUTH_TOKEN"]))
+                if warm is not None:
+                    warm.ask("Reply with exactly: ok", 60)
+                    sys.stderr.write("alfred: claude session warm.\n"); sys.stderr.flush()
+        except Exception as e:                          # noqa: BLE001
+            sys.stderr.write(f"alfred: claude pre-warm skipped ({e}).\n")
+    threading.Thread(target=_prewarm, daemon=True).start()
 
     class Handler(BaseHTTPRequestHandler):
         def _json(self, status, obj):
