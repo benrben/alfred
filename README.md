@@ -136,8 +136,11 @@ low`, codex `model_reasoning_effort=low`) — deep "thinking" isn't needed to cl
 up dictation, and skipping it is noticeably faster. Tune via `claude_effort` /
 `codex_reasoning_effort` in `[llm]`.
 
-> Note: speech-to-text is still **batch** today (it transcribes after you stop,
-> not live word-by-word). Real-time streaming STT is designed but not yet built.
+**Streaming transcription:** the warm daemon transcribes your recording **while
+you're still talking** (chunked at silences), so when you stop only the last
+short chunk remains — a long clip's multi-second post-stop wait drops to ~1–2s,
+and the Raycast Dictate view shows the transcript building live. (A native
+word-by-word streaming engine is a further optional upgrade.)
 
 ### From the terminal (no hotkey needed)
 

@@ -19,11 +19,14 @@ pickers default to **Default (config)**, which uses whatever you've set in
 ## Commands
 
 - **Dictate** — a live recorder (via `sox`): running timer + mic-level bar, the
-  active **output format** shown (`⌘F` to change it for this take). **⏎** stops &
-  transcribes. **⌃C** cancels; **Esc** keeps recording in the background (reopen
-  to stop). While processing it shows a **live per-step stopwatch** — Transcribing
-  audio → Translating & cleaning up (via local/claude/codex) → Delivering — with
-  each finished step's time and the current step ticking. The result screen then
+  active **output format** shown (`⌘F` to change it for this take). The engine
+  **transcribes while you speak** (when the warm daemon is up), so the
+  **transcript builds live** on screen and stopping is fast — only the last few
+  seconds are left to process. **⏎** stops & transcribes. **⌃C** cancels; **Esc**
+  keeps recording in the background (reopen to stop). While processing it shows a
+  **live per-step stopwatch** — Transcribing audio → Translating & cleaning up
+  (via local/claude/codex) → Delivering — with each finished step's time and the
+  current step ticking. The result screen then
   offers Paste / Copy, **Reprocess as…** (change the intent/format), **Refine with
   Feedback…** (`⌘E` — tell it what to change: "make it shorter", "more formal",
   "fix the date"), and Dictate Again.
