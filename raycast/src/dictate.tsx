@@ -27,9 +27,11 @@ import {
   isAlive,
   lastErrorLine,
   loadModes,
+  pingDaemon,
   Progress,
   readProgress,
   readRecState,
+  readStream,
   RecState,
   DeliveredResult,
   resolveDelivery,
@@ -173,6 +175,17 @@ export default function Dictate(props: {
       stateRef.current = { pid: child.pid, wav, meter, startedAt: stamp };
       writeRecState(stateRef.current);
       setPhase("recording");
+      // Start transcribing the growing WAV in the warm daemon so most of it is
+      // done by the time we stop. Best-effort: only via the daemon (a one-shot
+      // would exit immediately); on stop, stream-finish falls back to batch.
+      void (async () => {
+        try {
+          if (await pingDaemon())
+            await callEngine(["stream-start", wav, ...flagsForFormat(currentFormat())]);
+        } catch {
+          // streaming unavailable — batch on stop
+        }
+      })();
     } catch (e) {
       setError(`Could not start the recorder: ${String(e)}`);
       setPhase("error");
@@ -212,7 +225,10 @@ export default function Dictate(props: {
     }, 200);
     let res;
     try {
-      res = await callEngine(["process", st.wav, ...flagsForFormat(fmt)]);
+      // stream-finish: the daemon already transcribed most of the WAV while we
+      // recorded, so only the short tail remains. Falls back to a full batch
+      // transcribe if there was no live session.
+      res = await callEngine(["stream-finish", st.wav, ...flagsForFormat(fmt)]);
     } finally {
       clearInterval(poll);
     }
@@ -317,6 +333,12 @@ export default function Dictate(props: {
   const elapsed = st ? Math.floor((Date.now() - st.startedAt) / 1000) : 0;
   const level = readLevel(st?.meter);
   const fmt = currentFormat();
+  // Live partial transcript the daemon produces while we record (if streaming).
+  const stream = readStream();
+  const live =
+    stream && st && stream.ts >= st.startedAt && stream.transcript
+      ? stream.transcript
+      : "";
   const md = [
     "# 🔴 Recording",
     "",
@@ -325,6 +347,7 @@ export default function Dictate(props: {
     `\`${levelBar(level)}\``,
     "",
     `**Output:** ${fmt.ai ? fmt.title : "Raw transcript (no AI)"}  ·  ⌘F to change`,
+    ...(live ? ["", "---", "**Transcript so far**", "", live] : []),
     "",
     "**⏎** stop & transcribe · **⌃C** cancel · **Esc** keeps recording (reopen to stop).",
   ].join("\n");

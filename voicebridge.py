@@ -187,9 +187,10 @@ def _load_audio_16k(path: str):
     return audio
 
 
-def transcribe(audio_path: str, cfg: dict, *, language: str | None,
-               whisper_translate: bool) -> tuple[str, str | None]:
-    """Return (text, detected_language)."""
+def transcribe_samples(audio, cfg: dict, *, language: str | None,
+                       whisper_translate: bool,
+                       initial_prompt: str = "") -> tuple[str, str | None]:
+    """Transcribe a mono float32 16 kHz numpy array. Return (text, lang)."""
     try:
         import mlx_whisper
     except ModuleNotFoundError as e:
@@ -198,23 +199,192 @@ def transcribe(audio_path: str, cfg: dict, *, language: str | None,
             "(requires Apple Silicon)."
         ) from e
 
-    audio = _load_audio_16k(audio_path)
     lang = language if language and language != "auto" else None
     kwargs = dict(
         path_or_hf_repo=cfg["stt"]["model"],
         task="translate" if whisper_translate else "transcribe",
         language=lang,
-        verbose=False,
+        # verbose=None is fully silent: no "Detected language" print, no progress
+        # bar. Critical in the threaded daemon — a global stdout redirect here
+        # would race the request handler's stdout capture and the background
+        # streaming thread, corrupting responses.
+        verbose=None,
     )
-    if cfg["stt"].get("initial_prompt"):
-        kwargs["initial_prompt"] = cfg["stt"]["initial_prompt"]
+    ip = initial_prompt or cfg["stt"].get("initial_prompt")
+    if ip:
+        kwargs["initial_prompt"] = ip
 
-    # mlx-whisper prints "Detected language: ..." to stdout; keep our stdout
-    # clean (it carries VB_STATUS / --stdout text) by routing it to stderr.
-    import contextlib
-    with contextlib.redirect_stdout(sys.stderr):
-        result = mlx_whisper.transcribe(audio, **kwargs)
+    result = mlx_whisper.transcribe(audio, **kwargs)
     return (result.get("text") or "").strip(), result.get("language")
+
+
+def transcribe(audio_path: str, cfg: dict, *, language: str | None,
+               whisper_translate: bool) -> tuple[str, str | None]:
+    """Return (text, detected_language) for a whole audio file (batch)."""
+    audio = _load_audio_16k(audio_path)
+    return transcribe_samples(audio, cfg, language=language,
+                              whisper_translate=whisper_translate)
+
+
+# --- Streaming STT: transcribe a recording WHILE it's still being recorded -----
+# We read raw 16-bit-mono-16kHz PCM straight from the growing WAV (after its data
+# chunk) and transcribe it in chunks cut at silences, so when the user stops only
+# the last short chunk remains — turning a multi-second post-stop wait into ~1-2s.
+
+_STREAM_TARGET = 12 * 16000      # aim to cut a chunk around 12s …
+_STREAM_MAX = 18 * 16000         # … but no later than 18s (Whisper likes <=30s)
+_STREAM_FRAME = 800              # 50ms silence-search frame
+
+
+def _wav_data_offset(path: str) -> int:
+    """Byte offset of PCM samples inside a WAV (the 'data' chunk), or 44."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(8192)
+        i = head.find(b"data")
+        return i + 8 if i >= 0 else 44
+    except OSError:
+        return 44
+
+
+def _pcm_sample_count(path: str, data_off: int) -> int:
+    try:
+        return max(0, (os.path.getsize(path) - data_off)) // 2
+    except OSError:
+        return 0
+
+
+def _read_pcm_f32(path: str, data_off: int, start: int, end: int | None):
+    """Read mono int16 PCM in [start, end) samples -> float32 in [-1, 1]."""
+    import numpy as np
+    with open(path, "rb") as f:
+        f.seek(data_off + start * 2)
+        raw = f.read(-1 if end is None else (end - start) * 2)
+    n = len(raw) // 2
+    if n == 0:
+        return np.zeros(0, dtype=np.float32)
+    return np.frombuffer(raw[: n * 2], dtype=np.int16).astype(np.float32) / 32768.0
+
+
+def _silence_cut(buf, target: int, hard_max: int) -> int:
+    """Pick a cut offset in [target, hard_max] at the quietest 50ms frame, so
+    chunks break at a pause rather than mid-word."""
+    import numpy as np
+    if len(buf) <= target:
+        return len(buf)
+    hi = min(hard_max, len(buf))
+    region = buf[target:hi]
+    nf = region.size // _STREAM_FRAME
+    if nf <= 0:
+        return hi
+    r = region[: nf * _STREAM_FRAME].reshape(nf, _STREAM_FRAME)
+    rms = np.sqrt((r * r).mean(axis=1) + 1e-9)
+    return target + int(rms.argmin()) * _STREAM_FRAME + _STREAM_FRAME // 2
+
+
+def _stream_path() -> Path:
+    return Path.home() / ".voicebridge" / "stream.json"
+
+
+class StreamSession:
+    """Transcribes a growing WAV in the background while it is still being
+    recorded. `start` launches the chunk loop; `finish` stops it, transcribes the
+    final tail, and returns the full (text, lang). Front-ends poll stream.json for
+    the live partial transcript."""
+
+    def __init__(self, path: str, cfg: dict, language, whisper_translate: bool):
+        self.path = path
+        self.cfg = cfg
+        self.language = language
+        self.wt = whisper_translate
+        self.data_off = _wav_data_offset(path)
+        self.cursor = 0                 # samples already transcribed
+        self.parts: list[str] = []
+        self.last_lang = None
+        self.lock = threading.Lock()
+        self.stop = False
+        self.done = False
+        self.thread: threading.Thread | None = None
+
+    @property
+    def text(self) -> str:
+        return " ".join(p for p in self.parts if p).strip()
+
+    def _transcribe(self, end: int | None) -> None:
+        # end=None -> final tail: take all remaining (mlx-whisper windows it
+        # internally). end set -> a bounded window cut at the quietest pause.
+        buf = _read_pcm_f32(self.path, self.data_off, self.cursor, end)
+        if buf.size < _STREAM_FRAME:    # nothing meaningful yet
+            return
+        cut = len(buf) if end is None else _silence_cut(
+            buf, _STREAM_TARGET, _STREAM_MAX)
+        chunk = buf[:cut]
+        txt, lang = transcribe_samples(
+            chunk, self.cfg, language=self.language, whisper_translate=self.wt,
+            initial_prompt=self.text[-200:])
+        if txt:
+            self.parts.append(txt)
+        if lang:
+            self.last_lang = lang
+        self.cursor += cut
+        self._write()
+
+    def _chunk_once(self) -> bool:
+        if self.data_off == 44 and _wav_data_offset(self.path) != 44:
+            self.data_off = _wav_data_offset(self.path)  # header now written
+        avail = _pcm_sample_count(self.path, self.data_off)
+        if avail - self.cursor < _STREAM_MAX:
+            return False
+        self._transcribe(self.cursor + _STREAM_MAX)
+        return True
+
+    def _run(self) -> None:
+        while not self.stop:
+            worked = False
+            try:
+                with self.lock:
+                    worked = self._chunk_once()
+            except Exception as e:                       # noqa: BLE001
+                sys.stderr.write(f"stream chunk error: {e}\n")
+            time.sleep(0.2 if worked else 1.0)
+
+    def start(self) -> None:
+        self._write()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def finish(self) -> tuple[str, str | None]:
+        self.stop = True
+        if self.thread:
+            self.thread.join(timeout=3)
+        with self.lock:
+            avail = _pcm_sample_count(self.path, self.data_off)
+            while avail - self.cursor > _STREAM_FRAME:
+                before = self.cursor
+                if avail - self.cursor <= _STREAM_MAX:
+                    self._transcribe(None)               # final tail: take all
+                    break
+                self._transcribe(self.cursor + _STREAM_MAX)
+                if self.cursor <= before:                # safety: no progress
+                    break
+            self.done = True
+            self._write()
+        return self.text, self.last_lang
+
+    def _write(self) -> None:
+        try:
+            p = _stream_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps({
+                "transcript": self.text, "recording": not self.stop,
+                "done": self.done, "ts": _now_ms(),
+            }), encoding="utf-8")
+        except Exception:                                # noqa: BLE001
+            pass
+
+
+_STREAMS: dict[str, StreamSession] = {}
+_STREAMS_LOCK = threading.Lock()
 
 
 # ----------------------------------------------------------------------------
@@ -1020,6 +1190,38 @@ def _apply_overrides(cfg: dict, args) -> dict:
     return cfg
 
 
+def _finish_capture(text: str, cfg: dict, args, prog: "_Progress") -> int:
+    """Shared tail after transcription: LLM process -> deliver -> history ->
+    VB_STATUS, with the resilient raw-transcript fallback. Used by `process`
+    (batch) and `stream-finish` (streaming)."""
+    llm_label = _stage_label(cfg)
+    if llm_label:
+        prog.step("processing", llm_label)
+    try:
+        final = process_text(text, cfg)
+    except Exception as e:                            # noqa: BLE001
+        # Resilient: still deliver the raw transcript so nothing is lost.
+        sys.stderr.write(f"warning: LLM step failed, using raw transcript: {e}\n")
+        prog.step("delivering", "LLM failed — delivering raw transcript")
+        kind, path = deliver(text, cfg, cfg["output"]["mode"] == "paste")
+        history_append(text, cfg, "stt")
+        prog.done("done", "Done (raw transcript)")
+        print_status(*([kind, path] if path else [kind]), "llm_failed")
+        return 0
+
+    if getattr(args, "stdout", False):
+        prog.done()
+        sys.stdout.write(final + "\n")
+        return 0
+
+    prog.step("delivering", "Delivering")
+    kind, path = deliver(final, cfg, cfg["output"]["mode"] == "paste")
+    history_append(final, cfg, "stt")
+    prog.done()
+    print_status(*([kind, path] if path else [kind]))
+    return 0
+
+
 def cmd_process(args) -> int:
     cfg = _apply_overrides(load_config(args.config), args)
     prog = _Progress()
@@ -1063,35 +1265,67 @@ def cmd_process(args) -> int:
         return 0
 
     sys.stderr.write(f"transcript ({lang or '?'}): {text[:120]}\n")
+    return _finish_capture(text, cfg, args, prog)
 
-    final = text
-    llm_label = _stage_label(cfg)
-    if llm_label:
-        prog.step("processing", llm_label)
-    try:
-        final = process_text(text, cfg)
-    except Exception as e:                        # noqa: BLE001
-        # Resilient: still deliver the raw transcript so nothing is lost.
-        sys.stderr.write(f"warning: LLM step failed, using raw transcript: {e}\n")
-        final = text
-        prog.step("delivering", "LLM failed — delivering raw transcript")
-        kind, path = deliver(final, cfg, cfg["output"]["mode"] == "paste")
-        history_append(final, cfg, "stt")
-        prog.done("done", "Done (raw transcript)")
-        print_status(*([kind, path] if path else [kind]), "llm_failed")
-        return 0
 
-    if args.stdout:
-        prog.done()
-        sys.stdout.write(final + "\n")
-        return 0
-
-    prog.step("delivering", "Delivering")
-    kind, path = deliver(final, cfg, cfg["output"]["mode"] == "paste")
-    history_append(final, cfg, "stt")
-    prog.done()
-    print_status(*([kind, path] if path else [kind]))
+def cmd_stream_start(args) -> int:
+    """Begin transcribing a growing WAV in the background, so most of it is done
+    by the time recording stops. Only useful inside the warm daemon (the session
+    lives in its process); a one-shot run would exit immediately."""
+    cfg = _apply_overrides(load_config(args.config), args)
+    wt = whisper_translate_active(cfg)
+    sess = StreamSession(args.audio, cfg, cfg["stt"]["language"], wt)
+    with _STREAMS_LOCK:
+        old = _STREAMS.get(args.audio)
+        if old:
+            old.stop = True
+        _STREAMS[args.audio] = sess
+    sess.start()
+    print_status("streaming")
     return 0
+
+
+def cmd_stream_finish(args) -> int:
+    """Stop the background transcription, transcribe the final tail, then run the
+    LLM pipeline and deliver — the streaming counterpart of `process`. Falls back
+    to a full batch transcribe when there is no live session (daemon was down)."""
+    prog = _Progress()
+    with _STREAMS_LOCK:
+        sess = _STREAMS.pop(args.audio, None)
+    if sess is not None:
+        cfg = _apply_overrides(sess.cfg, args)   # finish-time format/backend wins
+        prog.step("transcribing", "Finishing transcription")
+        try:
+            text, lang = sess.finish()
+        except Exception as e:                        # noqa: BLE001
+            sys.stderr.write(f"error: stream finish failed: {e}\n")
+            prog.done("error", "Transcription failed")
+            print_status("error", "stt_failed")
+            return 1
+    else:
+        cfg = _apply_overrides(load_config(args.config), args)
+        wt = whisper_translate_active(cfg)
+        prog.step("transcribing", "Transcribing audio")
+        try:
+            text, lang = transcribe(args.audio, cfg,
+                                    language=cfg["stt"]["language"],
+                                    whisper_translate=wt)
+        except Exception as e:                        # noqa: BLE001
+            sys.stderr.write(f"error: transcription failed: {e}\n")
+            prog.done("error", "Transcription failed")
+            print_status("error", "stt_failed")
+            return 1
+    if not cfg["output"]["keep_audio"]:
+        try:
+            os.remove(args.audio)
+        except OSError:
+            pass
+    if not text:
+        prog.done("empty", "No speech detected")
+        print_status("empty")
+        return 0
+    sys.stderr.write(f"transcript ({lang or '?'}): {text[:120]}\n")
+    return _finish_capture(text, cfg, args, prog)
 
 
 def cmd_text(args) -> int:
@@ -1520,6 +1754,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_proc.add_argument("audio", help="path to the recorded audio file (wav)")
     add_common(p_proc)
     p_proc.set_defaults(func=cmd_process)
+
+    p_ss = sub.add_parser("stream-start",
+                          help="begin transcribing a growing WAV (daemon)")
+    p_ss.add_argument("audio", help="path to the WAV sox is recording into")
+    add_common(p_ss)
+    p_ss.set_defaults(func=cmd_stream_start)
+
+    p_sf = sub.add_parser("stream-finish",
+                          help="finish a streamed recording: tail + LLM + deliver")
+    p_sf.add_argument("audio", help="path to the recorded WAV")
+    add_common(p_sf)
+    p_sf.set_defaults(func=cmd_stream_finish)
 
     p_text = sub.add_parser("text", help="run the pipeline on text (Type mode)")
     p_text.add_argument("text", nargs="?", help="text, or '-'/omit to read stdin")

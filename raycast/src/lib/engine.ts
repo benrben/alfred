@@ -455,6 +455,32 @@ export function readProgress(): Progress | null {
   return null;
 }
 
+// ---- Live streaming transcript (engine transcribes the WAV while recording) --
+
+export interface StreamState {
+  transcript: string;
+  recording: boolean;
+  done: boolean;
+  ts: number; // epoch ms of the last write
+}
+
+export function streamFile(): string {
+  return join(homedir(), ".voicebridge", "stream.json");
+}
+
+/** The engine's live partial transcript during a streamed recording, or null. */
+export function readStream(): StreamState | null {
+  const f = streamFile();
+  if (!existsSync(f)) return null;
+  try {
+    const s = JSON.parse(readFileSync(f, "utf8")) as StreamState;
+    if (s && typeof s.transcript === "string" && typeof s.ts === "number") return s;
+  } catch {
+    // ignore mid-write / malformed
+  }
+  return null;
+}
+
 export async function getInputText(): Promise<string> {
   try {
     const sel = await getSelectedText();
