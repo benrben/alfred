@@ -618,10 +618,36 @@ _TAIL = ("Output ONLY the resulting text, with no preamble, labels, "
          "explanations, or surrounding quotes.")
 
 
+def _whisper_can_translate(cfg: dict) -> bool:
+    """Whether the configured Whisper model can do the translate task.
+
+    The *-turbo distilled models were NOT trained on translation: asked to
+    translate they silently emit near-source text (so a Hebrew capture comes
+    back in Hebrew, not English). Only the full models (e.g. whisper-large-v3)
+    translate. So `translate_via = "whisper"` is honoured only for non-turbo
+    models; otherwise translation is folded into the LLM stage, which is both
+    higher quality for Hebrew and the path that actually works on the default
+    turbo model.
+    """
+    model = (cfg.get("stt", {}) or {}).get("model", "") or ""
+    return "turbo" not in model.lower()
+
+
+def whisper_translate_active(cfg: dict) -> bool:
+    """Single source of truth: should the Whisper STT step itself translate?
+    Only when translate is on, the user asked for the whisper route, AND the
+    model can actually translate. Used by both `active_stages` (to avoid a
+    redundant LLM translate) and the transcribe call (to pick the task)."""
+    p = cfg["processing"]
+    return (bool(p["translate"]) and p.get("translate_via") == "whisper"
+            and _whisper_can_translate(cfg))
+
+
 def active_stages(cfg: dict) -> dict:
     p = cfg["processing"]
-    # If Whisper already translated, the LLM translate stage is redundant.
-    llm_translate = bool(p["translate"]) and p["translate_via"] == "llm"
+    # Translation routes through the LLM unless Whisper both can and was asked to
+    # do it; if Whisper already translated, the LLM translate stage is redundant.
+    llm_translate = bool(p["translate"]) and not whisper_translate_active(cfg)
     return {
         "translate": llm_translate,
         "rewrite": bool(p["rewrite"]),
@@ -814,8 +840,14 @@ def cmd_process(args) -> int:
         print_status("error", "audio_not_found")
         return 2
 
-    whisper_translate = (cfg["processing"]["translate"]
-                         and cfg["processing"]["translate_via"] == "whisper")
+    whisper_translate = whisper_translate_active(cfg)
+    if (cfg["processing"]["translate"]
+            and cfg["processing"].get("translate_via") == "whisper"
+            and not whisper_translate):
+        sys.stderr.write(
+            "note: model cannot Whisper-translate (turbo); translating via the "
+            "LLM instead.\n"
+        )
     try:
         text, lang = transcribe(
             audio, cfg, language=cfg["stt"]["language"],
