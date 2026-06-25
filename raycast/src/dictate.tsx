@@ -27,6 +27,8 @@ import {
   isAlive,
   lastErrorLine,
   loadModes,
+  Progress,
+  readProgress,
   readRecState,
   RecState,
   DeliveredResult,
@@ -41,6 +43,10 @@ function fmtTime(secs: number): string {
   const m = Math.floor(secs / 60);
   const s = secs % 60;
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+function fmtMs(ms: number): string {
+  return `${(Math.max(0, ms) / 1000).toFixed(1)}s`;
 }
 
 function tailFile(file: string, bytes = 8192): string {
@@ -110,6 +116,7 @@ export default function Dictate() {
   const [resultNote, setResultNote] = useState("");
   const [formats, setFormats] = useState<FormatChoice[]>([]);
   const [formatId, setFormatId] = useState<string>(CONFIG_FORMAT_ID);
+  const [prog, setProg] = useState<Progress | null>(null);
   const stateRef = useRef<RecState | null>(null);
 
   // Load the format list (async) and start/adopt a recording immediately. The
@@ -178,6 +185,7 @@ export default function Dictate() {
     if (!st) return;
     const fmt = currentFormat();
     setPhase("transcribing");
+    setProg(null);
     try {
       process.kill(st.pid, "SIGINT");
     } catch {
@@ -190,7 +198,20 @@ export default function Dictate() {
       setPhase("error");
       return;
     }
-    const res = await callEngine(["process", st.wav, ...flagsForFormat(fmt)]);
+    // Poll the engine's progress file for a live per-step stopwatch. Re-reading
+    // every 200ms also re-renders, so the current step's timer ticks. We ignore
+    // any stale file left by an earlier capture (ts older than this one).
+    const procStart = Date.now();
+    const poll = setInterval(() => {
+      const p = readProgress();
+      if (p && p.ts >= procStart - 1500) setProg(p);
+    }, 200);
+    let res;
+    try {
+      res = await callEngine(["process", st.wav, ...flagsForFormat(fmt)]);
+    } finally {
+      clearInterval(poll);
+    }
     const delivered = await resolveDelivery(res);
     if (delivered.kind === "copied" || delivered.kind === "saved") {
       setResult(delivered);
@@ -240,12 +261,26 @@ export default function Dictate() {
   }
 
   if (phase === "transcribing") {
-    const fmt = currentFormat();
+    const now = Date.now();
+    const current = prog && prog.phase !== "done" ? prog.label : "";
+    const status = current || "Transcribing…";
+    const lines: string[] = ["# ⏳ Working…", ""];
+    if (prog) {
+      for (const s of prog.steps) {
+        lines.push(`- ✅ ${s.label} — \`${fmtMs(s.ms)}\``);
+      }
+      if (current) {
+        lines.push(`- ⏳ **${current}** — \`${fmtMs(now - prog.ts)}\``);
+      }
+      lines.push("", `**Total** \`${fmtMs(now - prog.start)}\``);
+    } else {
+      lines.push("Starting…");
+    }
     return (
       <Detail
         isLoading
-        navigationTitle="Transcribing…"
-        markdown={`# ⏳ Transcribing…\n\nSpeech-to-text${fmt.ai ? ` + ${fmt.title}` : ""} via the Alfred engine.`}
+        navigationTitle={`${status} · ${prog ? fmtMs(now - prog.start) : "0.0s"}`}
+        markdown={lines.join("\n")}
       />
     );
   }

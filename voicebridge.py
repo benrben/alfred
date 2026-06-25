@@ -887,6 +887,74 @@ def print_status(*parts: str) -> None:
 
 
 # ----------------------------------------------------------------------------
+# Live progress (a small JSON file the front-ends poll to show a per-step
+# stopwatch: what the engine is doing now + how long each step took)
+# ----------------------------------------------------------------------------
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _progress_path() -> Path:
+    return Path.home() / ".voicebridge" / "progress.json"
+
+
+class _Progress:
+    """Records the pipeline's phases to a JSON file front-ends poll. `step` closes
+    the previous phase (recording its duration in ms) and opens the next; `done`
+    closes the last. Best-effort: never raises into the pipeline."""
+
+    def __init__(self):
+        self.start = _now_ms()
+        self.steps: list[dict] = []            # completed: [{"label", "ms"}]
+        self._cur: tuple[str, int] | None = None
+        self._write("starting", "Starting…", self.start)
+
+    def step(self, phase: str, label: str) -> None:
+        now = _now_ms()
+        if self._cur:
+            self.steps.append({"label": self._cur[0], "ms": now - self._cur[1]})
+        self._cur = (label, now)
+        self._write(phase, label, now)
+
+    def done(self, phase: str = "done", label: str = "Done") -> None:
+        now = _now_ms()
+        if self._cur:
+            self.steps.append({"label": self._cur[0], "ms": now - self._cur[1]})
+            self._cur = None
+        self._write(phase, label, now)
+
+    def _write(self, phase: str, label: str, ts: int) -> None:
+        try:
+            p = _progress_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps({
+                "phase": phase, "label": label, "ts": ts,
+                "start": self.start, "steps": self.steps,
+            }), encoding="utf-8")
+        except Exception:                          # noqa: BLE001
+            pass
+
+
+def _stage_label(cfg: dict) -> str:
+    """Human label for the LLM step, naming what it does + where it runs (e.g.
+    'Translating & cleaning up via claude…'). Empty if no LLM stage is active."""
+    s = active_stages(cfg)
+    acts = [name for name, on in (("Translating", s["translate"]),
+                                  ("cleaning up", s["rewrite"]),
+                                  ("polishing", s["optimize"])) if on]
+    if not acts:
+        return ""
+    text = " & ".join(acts)
+    text = text[0].upper() + text[1:]
+    backend = cfg["llm"].get("backend", "auto")
+    via = (" on-device" if backend == "local"
+           else f" via {backend}" if backend in ("claude", "codex")
+           else " via Claude")
+    return f"{text}{via}…"
+
+
+# ----------------------------------------------------------------------------
 # Commands
 # ----------------------------------------------------------------------------
 
@@ -918,9 +986,11 @@ def _apply_overrides(cfg: dict, args) -> dict:
 
 def cmd_process(args) -> int:
     cfg = _apply_overrides(load_config(args.config), args)
+    prog = _Progress()
     audio = args.audio
     if not Path(audio).is_file():
         sys.stderr.write(f"error: audio file not found: {audio}\n")
+        prog.done("error", "Audio file not found")
         print_status("error", "audio_not_found")
         return 2
 
@@ -932,6 +1002,7 @@ def cmd_process(args) -> int:
             "note: model cannot Whisper-translate (turbo); translating via the "
             "LLM instead.\n"
         )
+    prog.step("transcribing", "Transcribing audio")
     try:
         text, lang = transcribe(
             audio, cfg, language=cfg["stt"]["language"],
@@ -939,6 +1010,7 @@ def cmd_process(args) -> int:
         )
     except Exception as e:                       # noqa: BLE001
         sys.stderr.write(f"error: transcription failed: {e}\n")
+        prog.done("error", "Transcription failed")
         print_status("error", "stt_failed")
         return 1
 
@@ -950,29 +1022,38 @@ def cmd_process(args) -> int:
 
     if not text:
         sys.stderr.write("note: no speech detected.\n")
+        prog.done("empty", "No speech detected")
         print_status("empty")
         return 0
 
     sys.stderr.write(f"transcript ({lang or '?'}): {text[:120]}\n")
 
     final = text
+    llm_label = _stage_label(cfg)
+    if llm_label:
+        prog.step("processing", llm_label)
     try:
         final = process_text(text, cfg)
     except Exception as e:                        # noqa: BLE001
         # Resilient: still deliver the raw transcript so nothing is lost.
         sys.stderr.write(f"warning: LLM step failed, using raw transcript: {e}\n")
         final = text
+        prog.step("delivering", "LLM failed — delivering raw transcript")
         kind, path = deliver(final, cfg, cfg["output"]["mode"] == "paste")
         history_append(final, cfg, "stt")
+        prog.done("done", "Done (raw transcript)")
         print_status(*([kind, path] if path else [kind]), "llm_failed")
         return 0
 
     if args.stdout:
+        prog.done()
         sys.stdout.write(final + "\n")
         return 0
 
+    prog.step("delivering", "Delivering")
     kind, path = deliver(final, cfg, cfg["output"]["mode"] == "paste")
     history_append(final, cfg, "stt")
+    prog.done()
     print_status(*([kind, path] if path else [kind]))
     return 0
 

@@ -421,6 +421,40 @@ export function readHistory(limit = 50): HistoryItem[] {
   return items.reverse().slice(0, limit);
 }
 
+// ---- Live progress (per-step stopwatch the engine writes during a capture) --
+
+export interface ProgressStep {
+  label: string;
+  ms: number; // duration of a COMPLETED step
+}
+export interface Progress {
+  phase: string; // starting | transcribing | processing | delivering | done | error | empty
+  label: string; // human label of the CURRENT step
+  ts: number; // epoch ms the current step started (for a live stopwatch)
+  start: number; // epoch ms the capture's processing started (for the total)
+  steps: ProgressStep[]; // completed steps, in order
+}
+
+export function progressFile(): string {
+  return join(homedir(), ".voicebridge", "progress.json");
+}
+
+/** The engine's current pipeline progress, or null if none/unreadable. */
+export function readProgress(): Progress | null {
+  const f = progressFile();
+  if (!existsSync(f)) return null;
+  try {
+    const p = JSON.parse(readFileSync(f, "utf8")) as Progress;
+    if (p && typeof p.label === "string" && typeof p.ts === "number") {
+      if (!Array.isArray(p.steps)) p.steps = [];
+      return p;
+    }
+  } catch {
+    // ignore malformed / mid-write
+  }
+  return null;
+}
+
 export async function getInputText(): Promise<string> {
   try {
     const sel = await getSelectedText();
