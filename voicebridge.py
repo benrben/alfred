@@ -897,6 +897,7 @@ def _apply_overrides(cfg: dict, args) -> dict:
         # apply to whichever backend will run
         cfg["llm"]["claude_model"] = args.model
         cfg["llm"]["codex_model"] = args.model
+        cfg["llm"]["local_model"] = args.model
     if args.language:
         cfg["stt"]["language"] = args.language
     if args.mode:
@@ -1261,8 +1262,8 @@ def _bool_flag(parser, name, help_on, help_off):
 
 def add_common(p):
     p.add_argument("--config", help="path to config.toml")
-    p.add_argument("--backend", choices=["auto", "claude", "codex"],
-                   help="override LLM backend")
+    p.add_argument("--backend", choices=["local", "auto", "claude", "codex"],
+                   help="override LLM backend (local = on-device MLX)")
     p.add_argument("--model", help="override model name for the chosen backend")
     p.add_argument("--language", help="STT language code, or 'auto'")
     p.add_argument("--mode",
