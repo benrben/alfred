@@ -35,8 +35,17 @@ translate_via = "llm"
 combine_stages = true
 
 [llm]
-# auto = use claude if installed, else codex. Or force "claude" / "codex".
-backend = "auto"
+# local = strict on-device MLX model: $0, offline, nothing leaves the Mac — the
+#   default. auto = use claude if installed, else codex; or force "claude" /
+#   "codex" (these shell out to your signed-in CLI, keyless, as a quality boost).
+# Note: backend = "local" never silently falls back to a network CLI.
+backend = "local"
+# On-device model for the "local" backend (any mlx-community instruct repo).
+# First use downloads it (~2GB for the 3B-4bit). Qwen3-4B/8B once you've confirmed
+# the repo is available is a quality upgrade.
+local_model = "mlx-community/Qwen2.5-3B-Instruct-4bit"
+local_max_tokens = 1024   # cap on generated tokens per transform
+local_idle_secs = 600     # free the in-memory model after this many idle seconds
 # Aliases track the latest model and are safer than dated names.
 claude_model = "sonnet"
 codex_model = ""          # empty = codex default

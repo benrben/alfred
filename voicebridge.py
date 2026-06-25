@@ -76,7 +76,13 @@ DEFAULTS: dict = {
         "combine_stages": True,      # one LLM call (fast) vs separate calls
     },
     "llm": {
-        "backend": "auto",           # auto|claude|codex
+        # local = strict on-device MLX model ($0, offline, private) and the
+        # default; auto|claude|codex shell out to the user's signed-in CLI
+        # (keyless) as an opt-in quality boost. See adr-local-intent-default.
+        "backend": "local",          # local|auto|claude|codex
+        "local_model": "mlx-community/Qwen2.5-3B-Instruct-4bit",
+        "local_max_tokens": 1024,    # cap on generated tokens per transform
+        "local_idle_secs": 600,      # free the in-memory model after N idle secs
         "claude_model": "sonnet",    # alias tracks latest; safer than dates
         "codex_model": "",           # empty = codex default
         "claude_extra_args": [],
@@ -236,17 +242,22 @@ def detect_backends() -> dict:
 
 
 def candidate_backends(cfg: dict) -> list[str]:
-    """Ordered list of installed backends to try. For 'auto' we return both so a
-    failure (e.g. claude not logged in) falls back to the other."""
+    """Ordered list of backends to try. 'local' is the in-process MLX model (no
+    binary to find — availability is checked at call time). For 'auto' we return
+    both CLIs so a failure (e.g. claude not logged in) falls back to the other.
+    We deliberately do NOT fall back from 'local' to a network CLI: strict-local
+    must never silently make a cloud call."""
     want = cfg["llm"]["backend"]
+    if want == "local":
+        return ["local"]
     have = detect_backends()
     order = [want] if want in ("claude", "codex") else ["claude", "codex"]
     found = [b for b in order if have[b]]
     if not found:
         raise RuntimeError(
             "no LLM backend found. Install Claude Code (`claude`) or Codex "
-            "(`codex`) and sign in once, or disable the translate/rewrite/"
-            "optimize stages."
+            "(`codex`) and sign in once, set backend = \"local\" for the "
+            "on-device model, or disable the translate/rewrite/optimize stages."
         )
     return found
 
@@ -466,6 +477,8 @@ def _get_warm(cfg: dict, env: dict) -> WarmClaude | None:
 def run_llm(backend: str, prompt: str, cfg: dict) -> str:
     _t = int(cfg["llm"]["timeout"])
     timeout = _t if _t > 0 else None             # 0 = no timeout (big prompts)
+    if backend == "local":
+        return run_local_llm(prompt, cfg)
     if backend == "claude":
         # Strip API-key vars so claude uses the subscription OAuth login.
         env = _clean_env(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"])
@@ -516,6 +529,76 @@ def _strip_wrapping(text: str) -> str:
     if len(t) >= 2 and t[0] in "\"'" and t[-1] == t[0]:
         t = t[1:-1].strip()
     return t
+
+
+# ----------------------------------------------------------------------------
+# Local LLM backend  (strict on-device: MLX-LM, no network, no API key)
+# ----------------------------------------------------------------------------
+#
+# A warm, in-process MLX model held in memory across captures so we pay the
+# multi-second model load once, not per transform — the local analogue of the
+# warm-claude session. Single-flight (MLX generation is not re-entrant on one
+# model); the model is freed after `local_idle_secs` to reclaim RAM (it shares
+# the machine with the Whisper model). The two model-touching seams (_local_load
+# / _local_generate) are kept tiny and separate so tests can stub them without
+# importing mlx_lm or downloading weights.
+
+_LOCAL = None                 # (model, tokenizer) once loaded
+_LOCAL_SIG: str | None = None  # the model id currently loaded
+_LOCAL_LAST = 0.0             # monotonic time of the last generation
+_LOCAL_LOCK = threading.Lock()
+
+
+def _local_load(model_id: str):
+    """Load an MLX model + tokenizer. Lazy import so the rest of the engine runs
+    without mlx-lm installed; the clear error guides install when it's missing."""
+    try:
+        from mlx_lm import load
+    except ModuleNotFoundError as e:
+        raise RuntimeError(
+            "mlx-lm is not installed (needed for backend = \"local\"). Install "
+            "with: pip install mlx-lm  (Apple Silicon), or set backend to "
+            "\"auto\"/\"claude\"/\"codex\"."
+        ) from e
+    return load(model_id)
+
+
+def _local_generate(model, tokenizer, prompt: str, max_tokens: int) -> str:
+    """One generation turn. Applies the tokenizer's chat template when present so
+    instruct models behave, then generates. Isolated for stubbing in tests."""
+    from mlx_lm import generate
+    text = prompt
+    if getattr(tokenizer, "chat_template", None):
+        text = tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            add_generation_prompt=True, tokenize=False,
+        )
+    return generate(model, tokenizer, prompt=text,
+                    max_tokens=max_tokens, verbose=False)
+
+
+def run_local_llm(prompt: str, cfg: dict) -> str:
+    """Run one transform on the warm on-device MLX model. Strict-local: no
+    network, no key, nothing leaves the machine. Raises RuntimeError on failure
+    so process_text falls back to the raw transcript (nothing lost)."""
+    global _LOCAL, _LOCAL_SIG, _LOCAL_LAST
+    model_id = cfg["llm"].get("local_model") or DEFAULTS["llm"]["local_model"]
+    max_tokens = int(cfg["llm"].get("local_max_tokens", 1024))
+    idle = int(cfg["llm"].get("local_idle_secs", 600))
+    with _LOCAL_LOCK:                       # single-flight: one generation at a time
+        stale = (_LOCAL_LAST and idle > 0
+                 and time.monotonic() - _LOCAL_LAST > idle)
+        if _LOCAL is None or _LOCAL_SIG != model_id or stale:
+            _LOCAL = _local_load(model_id)   # (re)load; warm for next call
+            _LOCAL_SIG = model_id
+        model, tokenizer = _LOCAL
+        try:
+            out = _local_generate(model, tokenizer, prompt, max_tokens)
+        except Exception as e:               # noqa: BLE001
+            _LOCAL, _LOCAL_SIG = None, None  # drop a wedged model; reload next time
+            raise RuntimeError(f"local MLX model failed: {e}") from e
+        _LOCAL_LAST = time.monotonic()
+    return _strip_wrapping(out or "")
 
 
 # ----------------------------------------------------------------------------

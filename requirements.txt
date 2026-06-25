@@ -3,3 +3,6 @@
 mlx-whisper>=0.4.0
 soundfile>=0.12.1
 numpy>=1.24
+# Strict on-device intent backend (backend = "local"). First run downloads the
+# configured local_model (e.g. Qwen2.5-3B-Instruct-4bit, ~2GB).
+mlx-lm>=0.18.0
