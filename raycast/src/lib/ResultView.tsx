@@ -140,7 +140,15 @@ export function ResultView({
     setBanner(`✎ Refined: ${instruction}`);
   }
 
-  const markdown = `${banner ? `> ${banner}\n\n` : ""}${text || "_(empty)_"}`;
+  const adjust = [
+    "",
+    "---",
+    "### Adjust this result",
+    "- ✎ **Refine with feedback** — `⌘E`  ·  tell it what to change",
+    "- ↻ **Change intent / format** — `⌘R`",
+    `- 📋 Copy \`⌘C\`  ·  Paste \`⏎\`${onDictateAgain ? "  ·  🎙 Dictate again `⌘D`" : ""}`,
+  ].join("\n");
+  const markdown = `${banner ? `> ${banner}\n\n` : ""}${text || "_(empty)_"}\n${adjust}`;
 
   return (
     <Detail
