@@ -25,7 +25,7 @@ import { dirname, join } from "node:path";
 
 export interface Preferences {
   daemonPort: string;
-  backend: string; // default | auto | claude | codex
+  backend: string; // default | local | auto | claude | codex
   translate: string; // default | on | off
   pythonBin: string;
   engineScript: string;

@@ -77,6 +77,7 @@
       "default": "default",
       "data": [
         { "title": "Default (config)", "value": "default" },
+        { "title": "local (on-device MLX)", "value": "local" },
         { "title": "auto", "value": "auto" },
         { "title": "claude", "value": "claude" },
         { "title": "codex", "value": "codex" }
