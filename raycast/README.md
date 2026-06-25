@@ -20,12 +20,13 @@ pickers default to **Default (config)**, which uses whatever you've set in
 
 - **Dictate** — a live recorder (via `sox`): running timer + mic-level bar, the
   active **output format** shown (`⌘F` to change it for this take). **⏎** stops &
-  transcribes, then Paste / Copy / **Reprocess as…** / Dictate Again inline.
-  **⌃C** cancels; **Esc** keeps recording in the background (reopen to stop).
-  While processing it shows a **live per-step stopwatch** — Transcribing audio →
-  Translating & cleaning up (via local/claude/codex) → Delivering — with each
-  finished step's time and the current step ticking, so you see exactly what it's
-  doing and where the time goes.
+  transcribes. **⌃C** cancels; **Esc** keeps recording in the background (reopen
+  to stop). While processing it shows a **live per-step stopwatch** — Transcribing
+  audio → Translating & cleaning up (via local/claude/codex) → Delivering — with
+  each finished step's time and the current step ticking. The result screen then
+  offers Paste / Copy, **Reprocess as…** (change the intent/format), **Refine with
+  Feedback…** (`⌘E` — tell it what to change: "make it shorter", "more formal",
+  "fix the date"), and Dictate Again.
 - **Transform Text** — prefilled from the selection (or clipboard): pick a format,
   run, then Copy / Paste / Reprocess the result.
 - **Type & Process** — type a line and run it through the pipeline.
@@ -34,7 +35,9 @@ pickers default to **Default (config)**, which uses whatever you've set in
   Default**, and **edit/add** the rewrite **prompt** behind each one. Saves to
   `config.toml` via the engine, so it applies to every front-end. Also a `⌘I`
   action on the Transform/Type forms.
-- **Alfred Menu Bar** — recording state + quick access to every command.
+- **Alfred Menu Bar** — recording state (🔴 while live) + quick access to every
+  command. While recording it shows **Stop & Transcribe** (one click stops);
+  otherwise **Dictate**.
 - **Engine Status** — daemon health, the current **default format / stages /
   backend**, resolved paths, and the engine's `doctor`. Handy right after install.
 

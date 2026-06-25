@@ -49,6 +49,11 @@ local_idle_secs = 600     # free the in-memory model after this many idle second
 # Aliases track the latest model and are safer than dated names.
 claude_model = "sonnet"
 codex_model = ""          # empty = codex default
+# Reasoning ("thinking") effort — kept low for fast text transforms (cleaning up
+# dictation doesn't need deep reasoning). "" = leave the CLI default.
+claude_effort = "low"             # low | medium | high | xhigh | max
+codex_reasoning_effort = "low"    # low | medium | high  ("minimal" errors while
+                                  # codex's web_search/image_gen tools are on)
 # Models offered in the front-end's dropdowns (claude defaults: opus/sonnet/haiku).
 # Add extras here to extend those lists; the active model stays claude_model/codex_model.
 # claude_models = ["opus", "sonnet", "haiku"]

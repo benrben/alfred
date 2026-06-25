@@ -131,6 +131,14 @@ so each dictation skips the multi-second model load. It starts automatically and
 survives Hammerspoon reloads; if it ever wedges, choose **Restart engine (warm)**
 from the menu. (The very first run still downloads the model once.)
 
+The LLM step also runs at **low reasoning effort** by default (claude `--effort
+low`, codex `model_reasoning_effort=low`) — deep "thinking" isn't needed to clean
+up dictation, and skipping it is noticeably faster. Tune via `claude_effort` /
+`codex_reasoning_effort` in `[llm]`.
+
+> Note: speech-to-text is still **batch** today (it transcribes after you stop,
+> not live word-by-word). Real-time streaming STT is designed but not yet built.
+
 ### From the terminal (no hotkey needed)
 
 ```bash
