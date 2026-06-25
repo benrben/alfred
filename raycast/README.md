@@ -22,6 +22,10 @@ pickers default to **Default (config)**, which uses whatever you've set in
   active **output format** shown (`⌘F` to change it for this take). **⏎** stops &
   transcribes, then Paste / Copy / **Reprocess as…** / Dictate Again inline.
   **⌃C** cancels; **Esc** keeps recording in the background (reopen to stop).
+  While processing it shows a **live per-step stopwatch** — Transcribing audio →
+  Translating & cleaning up (via local/claude/codex) → Delivering — with each
+  finished step's time and the current step ticking, so you see exactly what it's
+  doing and where the time goes.
 - **Transform Text** — prefilled from the selection (or clipboard): pick a format,
   run, then Copy / Paste / Reprocess the result.
 - **Type & Process** — type a line and run it through the pipeline.
@@ -75,9 +79,11 @@ The two things it **can't** do, which you must grant once:
 Set in Raycast → Extensions → Alfred. All optional:
 
 - **Daemon Port** (default `8763`) — must match the engine's `serve` port.
-- **LLM Backend** / **Translate** — fallback defaults when a picker is left on
-  "Default (config)". (The default *format* lives in config — set it in **Manage
-  Intents**, not here.)
+- **LLM Backend** / **Translate** — override per capture. **LLM Backend** offers
+  **local (on-device MLX)**, `auto`, `claude`, `codex`, or **Default (config)**.
+  `local` is strict on-device ($0, offline); `claude`/`codex` are keyless via your
+  CLI login. (The default *format* lives in config — set it in **Manage Intents**,
+  not here.)
 - **Python (venv)** / **Engine Script** / **sox Path** — only used to start the
   daemon or fall back when it's down; `~` is expanded.
 

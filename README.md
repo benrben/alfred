@@ -3,14 +3,20 @@
 Local speech-to-text + LLM cleanup for macOS. Press a hotkey, speak in **any
 language (Hebrew included)**, and clean text lands on your clipboard.
 
-Everything runs on your Mac except an **optional** LLM step, which shells out to
-the `claude` or `codex` CLI **you already signed in to** — no API key is ever
-required, read, or stored.
+**Everything can run on your Mac** — the cleanup/translate step defaults to a
+**strict on-device model** (MLX, no login, no network, $0). Prefer higher
+quality? Switch the backend to the `claude` or `codex` CLI **you already signed
+in to** — still keyless: no API key is ever required, read, or stored.
 
 ```
 hotkey → record → transcribe (mlx-whisper) → [translate → rewrite → optimize] → clipboard / file
-                                              └── optional, each toggleable ──┘
+                                              │   via local MLX (default) ──or── keyless claude/codex   │
+                                              └── optional, each toggleable ──────────────────────────┘
 ```
+
+The Raycast **Dictate** view shows a live **per-step stopwatch** while it works
+(Transcribing → Translating & cleaning up → Delivering), so you always see what
+it's doing and how long each step takes.
 
 This is a working **V1**: an engine plus pluggable front-ends that talk over a
 tiny CLI / localhost-HTTP contract.
@@ -29,7 +35,9 @@ tiny CLI / localhost-HTTP contract.
 - `python3` (3.11+ recommended), Homebrew.
 - `sox` for recording: `brew install sox`.
 - Hammerspoon for hotkeys: `brew install --cask hammerspoon`.
-- Optional, for translate/rewrite/optimize: the `claude` and/or `codex` CLI, signed in.
+- For translate/rewrite/optimize: either the default **on-device** model
+  (`mlx-lm`, installed automatically — first use downloads ~2GB), or the
+  `claude` and/or `codex` CLI signed in (keyless). Raw transcription needs neither.
 
 ## Install
 
@@ -153,7 +161,11 @@ installer; see `config.example.toml` for every option). Highlights:
   `replace = true` to use your prompt as the *whole* rewrite instruction instead
   of appending to the cleanup. See `config.example.toml`; list them with
   `voicebridge.py modes`.
-- **Backend** (`[llm] backend`): `auto` (claude, else codex), or force one.
+- **Backend** (`[llm] backend`): `local` (default — a strict on-device MLX model,
+  set by `local_model`, e.g. `Qwen2.5-3B-Instruct-4bit`; `$0`, offline, never
+  leaves the Mac), `auto` (claude, else codex), or force `claude`/`codex`. `local`
+  never silently falls back to a network CLI. Local is faster-to-private but lower
+  quality than Claude on a small model — pick per your need.
 - **Output** (`[output]`): `copy` vs `paste`; results longer than
   `size_threshold` chars are saved to `save_dir` and you get a notification with
   the path instead of a clipboard dump.
@@ -162,15 +174,22 @@ installer; see `config.example.toml` for every option). Highlights:
 
 `mlx-whisper` transcribes Hebrew well. Two ways to get **English** out:
 
-- `translate_via = "llm"` (default) — Claude/Codex translates. Best quality for
-  Hebrew, keeps tone, and combines with rewrite/optimize in one pass.
+- `translate_via = "llm"` (default) — the LLM (local model, or Claude/Codex)
+  translates. Best quality for Hebrew, keeps tone, and combines with
+  rewrite/optimize in one pass.
 - `translate_via = "whisper"` — fully on-device via Whisper's translate task.
-  For this, set `model = "mlx-community/whisper-large-v3"` (the `-turbo` model is
-  weaker at translation).
+  This only works on a **full** model, so set `model =
+  "mlx-community/whisper-large-v3"`. On the default `-turbo` model (which cannot
+  translate) Alfred automatically routes translation through the LLM instead, so
+  Hebrew→English never silently fails.
 
 For best accuracy you can force `language = "he"` instead of `"auto"`.
 
 ## How "keyless" works (and why it won't surprise-bill you)
+
+> With the default `backend = "local"` none of this applies — the LLM runs fully
+> on-device (MLX), no CLI, no network, no key. The below is for when you switch
+> to `claude`/`codex` for higher quality.
 
 The engine spawns your own `claude`/`codex` binary and **strips the API-key
 environment variables** first (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,

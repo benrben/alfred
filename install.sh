@@ -92,10 +92,13 @@ cat <<EOF
 
 ------------------------------------------------------------------
 Next steps:
-  1. Sign in to at least one LLM CLI (one-time), if you want cleanup/translate:
-        claude        # then type: /login        (Claude Code)
-        codex login   # Sign in with ChatGPT     (Codex)
-     Raw transcription works without either.
+  1. Pick how the cleanup/translate step runs:
+       • local  (default) — strict on-device MLX model, no login, no network,
+         \$0. mlx-lm was just installed; the model (~2GB) downloads on first use.
+       • claude / codex — higher quality, keyless via your CLI login (one-time):
+            claude        # then type: /login        (Claude Code)
+            codex login   # Sign in with ChatGPT     (Codex)
+     Set "backend" in the config (step below). Raw transcription needs neither.
 
   2. Turn on the global hotkeys (Hammerspoon is installed and wired up above):
         open -a Hammerspoon

@@ -1309,6 +1309,22 @@ def cmd_doctor(args) -> int:
         print("    (LLM stages disabled until claude or codex is installed; "
               "raw transcription still works)")
 
+    # Local on-device backend (MLX-LM) — strict-local, no login, no network
+    try:
+        __import__("mlx_lm")
+        mlx_ok = True
+    except Exception:                              # noqa: BLE001
+        mlx_ok = False
+    print(f"{ok if mlx_ok else warn}python module: mlx_lm"
+          + ("" if mlx_ok else "   -> pip install mlx-lm  (for backend = local)"))
+    local_model = cfg["llm"].get("local_model", "")
+    if local_model:
+        cache = (Path.home() / ".cache" / "huggingface" / "hub"
+                 / ("models--" + local_model.replace("/", "--")))
+        print(f"{ok if cache.exists() else warn}local model: {local_model}"
+              + ("  (cached)" if cache.exists()
+                 else "  (downloads on first 'backend = local' use)"))
+
     # Config + paths
     print("-" * 40)
     print(f"config: {cfg.get('_loaded_from', '(built-in defaults)')}")
