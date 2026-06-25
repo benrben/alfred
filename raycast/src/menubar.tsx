@@ -1,8 +1,8 @@
 import { Icon, LaunchType, MenuBarExtra, launchCommand } from "@raycast/api";
 import { isAlive, readRecState } from "./lib/engine";
 
-function open(name: string) {
-  return () => launchCommand({ name, type: LaunchType.UserInitiated });
+function open(name: string, context?: Record<string, unknown>) {
+  return () => launchCommand({ name, type: LaunchType.UserInitiated, context });
 }
 
 export default function MenuBar() {
@@ -16,9 +16,10 @@ export default function MenuBar() {
       tooltip="Alfred"
     >
       <MenuBarExtra.Item
-        title={recording ? "Stop Recording…" : "Dictate"}
+        title={recording ? "Stop & Transcribe" : "Dictate"}
         icon={recording ? Icon.Stop : Icon.Microphone}
-        onAction={open("dictate")}
+        // While recording, open Dictate already in "stop" mode (one click stops).
+        onAction={open("dictate", recording ? { stop: true } : undefined)}
       />
       <MenuBarExtra.Separator />
       <MenuBarExtra.Item

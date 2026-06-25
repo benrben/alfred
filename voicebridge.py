@@ -85,6 +85,12 @@ DEFAULTS: dict = {
         "local_idle_secs": 600,      # free the in-memory model after N idle secs
         "claude_model": "sonnet",    # alias tracks latest; safer than dates
         "codex_model": "",           # empty = codex default
+        # Reasoning ("thinking") effort — kept LOW for fast text transforms (we
+        # don't need deep reasoning to clean up dictation). "" = leave the CLI
+        # default. claude: low|medium|high|xhigh|max. codex: low|medium|high
+        # ("minimal" is rejected when codex's web_search/image_gen tools are on).
+        "claude_effort": "low",
+        "codex_reasoning_effort": "low",
         "claude_extra_args": [],
         "codex_extra_args": [],
         "timeout": 120,              # seconds per LLM call
@@ -333,6 +339,8 @@ def _claude_warm_cmd(cfg: dict) -> list[str]:
            "--output-format", "stream-json", "--verbose"]
     if cfg["llm"].get("claude_model"):
         cmd += ["--model", cfg["llm"]["claude_model"]]
+    if cfg["llm"].get("claude_effort"):
+        cmd += ["--effort", cfg["llm"]["claude_effort"]]
     if cfg["llm"].get("fast", True):
         cmd += ["--strict-mcp-config", "--setting-sources", ""]
     cmd += list(cfg["llm"].get("claude_extra_args") or [])
@@ -492,6 +500,10 @@ def run_llm(backend: str, prompt: str, cfg: dict) -> str:
         cmd = [find_tool("claude") or "claude", "-p", prompt]
         if cfg["llm"].get("claude_model"):
             cmd += ["--model", cfg["llm"]["claude_model"]]
+        if cfg["llm"].get("claude_effort"):
+            # Low reasoning effort = faster; deep thinking isn't needed to clean
+            # up dictation.
+            cmd += ["--effort", cfg["llm"]["claude_effort"]]
         if cfg["llm"].get("fast", True):
             # Skip the user's MCP servers, plugins, hooks, CLAUDE.md and settings:
             # pure startup overhead for a one-shot text transform.
@@ -501,6 +513,11 @@ def run_llm(backend: str, prompt: str, cfg: dict) -> str:
     if backend == "codex":
         cmd = [find_tool("codex") or "codex", "exec", "--skip-git-repo-check",
                "--sandbox", "read-only"]
+        if cfg["llm"].get("codex_reasoning_effort"):
+            # Low reasoning effort = faster. ("minimal" is rejected while codex's
+            # web_search/image_gen tools are enabled, so we default to "low".)
+            # Bare value (no quotes) — there's no shell here to strip them.
+            cmd += ["-c", f"model_reasoning_effort={cfg['llm']['codex_reasoning_effort']}"]
         if cfg["llm"].get("codex_model"):
             cmd += ["-m", cfg["llm"]["codex_model"]]
         cmd += list(cfg["llm"].get("codex_extra_args") or [])
@@ -799,6 +816,25 @@ def process_text(text: str, cfg: dict) -> str:
     return out
 
 
+def refine_text(text: str, instruction: str, cfg: dict) -> str:
+    """Apply a free-text user instruction to an existing result (the feedback
+    loop: 'make it shorter', 'more formal', 'fix the date'). One LLM call that
+    revises the text per the instruction; bypasses the stage pipeline. Falls back
+    to the original text if the LLM returns nothing."""
+    text = (text or "").strip()
+    instruction = (instruction or "").strip()
+    if not text or not instruction:
+        return text
+    backends = candidate_backends(cfg)
+    prompt = (
+        "Revise the INPUT TEXT according to the user's instruction. Apply only "
+        "what the instruction asks; preserve everything else, including language. "
+        f"Do not answer or explain.\n\nINSTRUCTION: {instruction}\n\n"
+        f"{_TAIL}\n\nINPUT TEXT:\n{text}"
+    )
+    return run_llm_fallback(backends, prompt, cfg) or text
+
+
 # ----------------------------------------------------------------------------
 # Output / delivery
 # ----------------------------------------------------------------------------
@@ -1065,8 +1101,10 @@ def cmd_text(args) -> int:
         text = sys.stdin.read()
     else:
         text = args.text
+    instruction = getattr(args, "instruction", None)
     try:
-        final = process_text(text, cfg)
+        final = (refine_text(text, instruction, cfg) if instruction
+                 else process_text(text, cfg))
     except Exception as e:                        # noqa: BLE001
         sys.stderr.write(f"error: processing failed: {e}\n")
         print_status("error", "llm_failed")
@@ -1485,6 +1523,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_text = sub.add_parser("text", help="run the pipeline on text (Type mode)")
     p_text.add_argument("text", nargs="?", help="text, or '-'/omit to read stdin")
+    p_text.add_argument("--instruction", help="apply a free-text instruction to "
+                        "the text (feedback refine: 'make it shorter') instead of "
+                        "the configured stages")
     add_common(p_text)
     p_text.set_defaults(func=cmd_text)
 

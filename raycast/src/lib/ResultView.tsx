@@ -2,12 +2,15 @@ import {
   Action,
   ActionPanel,
   Detail,
+  Form,
   Icon,
   Toast,
   showToast,
+  useNavigation,
 } from "@raycast/api";
 import { useState } from "react";
 import {
+  backendFlags,
   callEngine,
   FormatChoice,
   flagsForFormat,
@@ -26,8 +29,72 @@ interface ResultViewProps {
   onDictateAgain?: () => void;
 }
 
-// A transcript/result screen with Paste / Copy and a "Reprocess as…" submenu
-// that re-runs the text through any format (raw → email, tighten, translate…).
+// A free-text "tell it what to change" form. Re-runs the current result through
+// the engine with a one-off instruction (no stage pipeline) and returns the
+// revised text to the result screen.
+function FeedbackForm({
+  currentText,
+  onRefined,
+}: {
+  currentText: string;
+  onRefined: (text: string, instruction: string) => void;
+}) {
+  const { pop } = useNavigation();
+  const [busy, setBusy] = useState(false);
+
+  async function submit(values: { instruction: string }) {
+    const instruction = (values.instruction || "").trim();
+    if (!instruction) return;
+    setBusy(true);
+    const toast = await showToast({
+      style: Toast.Style.Animated,
+      title: "Refining…",
+    });
+    const res = await callEngine([
+      "text",
+      currentText,
+      "--instruction",
+      instruction,
+      ...backendFlags(),
+    ]);
+    const delivered = await resolveDelivery(res);
+    setBusy(false);
+    if (delivered.kind === "copied" || delivered.kind === "saved") {
+      toast.style = Toast.Style.Success;
+      toast.title = "Refined";
+      onRefined(delivered.text ?? currentText, instruction);
+      pop();
+    } else {
+      toast.style = Toast.Style.Failure;
+      toast.title = "Refine failed";
+      toast.message = lastErrorLine(res.err);
+    }
+  }
+
+  return (
+    <Form
+      isLoading={busy}
+      navigationTitle="Refine with feedback"
+      actions={
+        <ActionPanel>
+          <Action.SubmitForm title="Apply Feedback" icon={Icon.Wand} onSubmit={submit} />
+        </ActionPanel>
+      }
+    >
+      <Form.Description text="Tell Alfred what to change. It revises the current result." />
+      <Form.TextArea
+        id="instruction"
+        title="Feedback"
+        placeholder="e.g. make it shorter · more formal · fix the date · translate to Hebrew"
+        autoFocus
+      />
+    </Form>
+  );
+}
+
+// A transcript/result screen with Paste / Copy, a "Reprocess as…" submenu that
+// re-runs the text through any format, and "Refine with feedback…" to adjust it
+// with a free-text instruction.
 export function ResultView({
   initialText,
   path,
@@ -36,6 +103,7 @@ export function ResultView({
   note,
   onDictateAgain,
 }: ResultViewProps) {
+  const { push } = useNavigation();
   const [text, setText] = useState(initialText);
   const [banner, setBanner] = useState<string>(
     llmFailed
@@ -67,6 +135,11 @@ export function ResultView({
     }
   }
 
+  function applyRefined(newText: string, instruction: string) {
+    setText(newText);
+    setBanner(`✎ Refined: ${instruction}`);
+  }
+
   const markdown = `${banner ? `> ${banner}\n\n` : ""}${text || "_(empty)_"}`;
 
   return (
@@ -80,6 +153,14 @@ export function ResultView({
             title="Copy"
             content={text}
             shortcut={{ modifiers: ["cmd"], key: "c" }}
+          />
+          <Action
+            title="Refine with Feedback…"
+            icon={Icon.Pencil}
+            shortcut={{ modifiers: ["cmd"], key: "e" }}
+            onAction={() =>
+              push(<FeedbackForm currentText={text} onRefined={applyRefined} />)
+            }
           />
           <ActionPanel.Submenu
             title="Reprocess as…"

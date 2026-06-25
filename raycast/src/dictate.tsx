@@ -108,7 +108,9 @@ function waitForExit(pid: number, timeoutMs: number): Promise<void> {
   });
 }
 
-export default function Dictate() {
+export default function Dictate(props: {
+  launchContext?: { stop?: boolean };
+}) {
   const [phase, setPhase] = useState<Phase>("recording");
   const [, setTick] = useState(0);
   const [error, setError] = useState("");
@@ -131,6 +133,8 @@ export default function Dictate() {
     if (existing && isAlive(existing.pid)) {
       stateRef.current = existing;
       setPhase("recording");
+      // Opened from the menu bar's "Stop & Transcribe" — stop immediately.
+      if (props.launchContext?.stop) void stopAndTranscribe();
     } else {
       if (existing) clearRecState();
       startRecording();
