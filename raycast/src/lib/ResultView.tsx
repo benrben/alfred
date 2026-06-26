@@ -17,6 +17,12 @@ import {
   lastErrorLine,
   resolveDelivery,
 } from "./engine";
+import {
+  composeResultMarkdown,
+  initialBanner,
+  refinedBanner,
+  reprocessBanner,
+} from "./view-logic";
 
 interface ResultViewProps {
   initialText: string;
@@ -77,7 +83,11 @@ function FeedbackForm({
       navigationTitle="Refine with feedback"
       actions={
         <ActionPanel>
-          <Action.SubmitForm title="Apply Feedback" icon={Icon.Wand} onSubmit={submit} />
+          <Action.SubmitForm
+            title="Apply Feedback"
+            icon={Icon.Wand}
+            onSubmit={submit}
+          />
         </ActionPanel>
       }
     >
@@ -106,11 +116,7 @@ export function ResultView({
   const { push } = useNavigation();
   const [text, setText] = useState(initialText);
   const [banner, setBanner] = useState<string>(
-    llmFailed
-      ? "⚠️ LLM step failed — raw transcript below."
-      : path
-        ? `💾 Saved to \`${path}\``
-        : (note ?? ""),
+    initialBanner({ llmFailed, path, note }),
   );
   const [busy, setBusy] = useState(false);
 
@@ -125,7 +131,7 @@ export function ResultView({
     setBusy(false);
     if (delivered.kind === "copied" || delivered.kind === "saved") {
       setText(delivered.text ?? text);
-      setBanner(fmt.ai ? `↻ Reprocessed as ${fmt.title}` : "↻ Raw transcript");
+      setBanner(reprocessBanner(fmt));
       toast.style = Toast.Style.Success;
       toast.title = "Done";
     } else {
@@ -137,18 +143,14 @@ export function ResultView({
 
   function applyRefined(newText: string, instruction: string) {
     setText(newText);
-    setBanner(`✎ Refined: ${instruction}`);
+    setBanner(refinedBanner(instruction));
   }
 
-  const adjust = [
-    "",
-    "---",
-    "### Adjust this result",
-    "- ✎ **Refine with feedback** — `⌘E`  ·  tell it what to change",
-    "- ↻ **Change intent / format** — `⌘R`",
-    `- 📋 Copy \`⌘C\`  ·  Paste \`⏎\`${onDictateAgain ? "  ·  🎙 Dictate again `⌘D`" : ""}`,
-  ].join("\n");
-  const markdown = `${banner ? `> ${banner}\n\n` : ""}${text || "_(empty)_"}\n${adjust}`;
+  const markdown = composeResultMarkdown({
+    banner,
+    text,
+    canDictateAgain: !!onDictateAgain,
+  });
 
   return (
     <Detail

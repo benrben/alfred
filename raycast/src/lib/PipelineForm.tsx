@@ -22,6 +22,7 @@ import {
   parseStatus,
   resolveDelivery,
 } from "./engine";
+import { resolveFormat } from "./view-logic";
 import { ResultView } from "./ResultView";
 
 interface PipelineFormProps {
@@ -67,8 +68,7 @@ export function PipelineForm({ prefillSelection }: PipelineFormProps) {
       });
       return;
     }
-    const fmt =
-      formats.find((f) => f.id === values.format) ?? formats[0] ?? null;
+    const fmt = resolveFormat(formats, values.format);
     if (!fmt) {
       await showToast({
         style: Toast.Style.Failure,

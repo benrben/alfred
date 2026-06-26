@@ -38,18 +38,17 @@ import {
   writeRecState,
 } from "./lib/engine";
 import { ResultView } from "./lib/ResultView";
+import {
+  buildRecordingMarkdown,
+  buildTranscribingMarkdown,
+  fmtMs,
+  fmtTime,
+  parseLevel,
+  resolveLiveTranscript,
+  transcribingStatus,
+} from "./lib/view-logic";
 
 type Phase = "recording" | "transcribing" | "done" | "error";
-
-function fmtTime(secs: number): string {
-  const m = Math.floor(secs / 60);
-  const s = secs % 60;
-  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-}
-
-function fmtMs(ms: number): string {
-  return `${(Math.max(0, ms) / 1000).toFixed(1)}s`;
-}
 
 function tailFile(file: string, bytes = 8192): string {
   try {
@@ -73,27 +72,7 @@ function tailFile(file: string, bytes = 8192): string {
 // sox -S writes a VU meter to stderr as a bracketed segment containing a '|'.
 function readLevel(meterFile?: string): number {
   if (!meterFile) return 0;
-  const data = tailFile(meterFile);
-  if (!data) return 0;
-  const segs = data.split(/[\r\n]+/);
-  for (let i = segs.length - 1; i >= 0 && i > segs.length - 8; i--) {
-    const m = segs[i].match(/\[([^[\]]*\|[^[\]]*)\]/);
-    if (m) {
-      let fill = 0;
-      let total = 0;
-      for (const ch of m[1]) {
-        total++;
-        if (ch !== " " && ch !== "|") fill++;
-      }
-      if (total > 0) return Math.min(1, fill / total);
-    }
-  }
-  return 0;
-}
-
-function levelBar(level: number, width = 22): string {
-  const filled = Math.max(0, Math.min(width, Math.round(level * width)));
-  return "█".repeat(filled) + "░".repeat(width - filled);
+  return parseLevel(tailFile(meterFile));
 }
 
 function waitForExit(pid: number, timeoutMs: number): Promise<void> {
@@ -110,9 +89,7 @@ function waitForExit(pid: number, timeoutMs: number): Promise<void> {
   });
 }
 
-export default function Dictate(props: {
-  launchContext?: { stop?: boolean };
-}) {
+export default function Dictate(props: { launchContext?: { stop?: boolean } }) {
   const [phase, setPhase] = useState<Phase>("recording");
   const [, setTick] = useState(0);
   const [error, setError] = useState("");
@@ -181,7 +158,11 @@ export default function Dictate(props: {
       void (async () => {
         try {
           if (await pingDaemon())
-            await callEngine(["stream-start", wav, ...flagsForFormat(currentFormat())]);
+            await callEngine([
+              "stream-start",
+              wav,
+              ...flagsForFormat(currentFormat()),
+            ]);
         } catch {
           // streaming unavailable — batch on stop
         }
@@ -282,25 +263,12 @@ export default function Dictate(props: {
 
   if (phase === "transcribing") {
     const now = Date.now();
-    const current = prog && prog.phase !== "done" ? prog.label : "";
-    const status = current || "Transcribing…";
-    const lines: string[] = ["# ⏳ Working…", ""];
-    if (prog) {
-      for (const s of prog.steps) {
-        lines.push(`- ✅ ${s.label} — \`${fmtMs(s.ms)}\``);
-      }
-      if (current) {
-        lines.push(`- ⏳ **${current}** — \`${fmtMs(now - prog.ts)}\``);
-      }
-      lines.push("", `**Total** \`${fmtMs(now - prog.start)}\``);
-    } else {
-      lines.push("Starting…");
-    }
+    const status = transcribingStatus(prog);
     return (
       <Detail
         isLoading
         navigationTitle={`${status} · ${prog ? fmtMs(now - prog.start) : "0.0s"}`}
-        markdown={lines.join("\n")}
+        markdown={buildTranscribingMarkdown(prog, now)}
       />
     );
   }
@@ -334,23 +302,8 @@ export default function Dictate(props: {
   const level = readLevel(st?.meter);
   const fmt = currentFormat();
   // Live partial transcript the daemon produces while we record (if streaming).
-  const stream = readStream();
-  const live =
-    stream && st && stream.ts >= st.startedAt && stream.transcript
-      ? stream.transcript
-      : "";
-  const md = [
-    "# 🔴 Recording",
-    "",
-    `## ${fmtTime(elapsed)}`,
-    "",
-    `\`${levelBar(level)}\``,
-    "",
-    `**Output:** ${fmt.ai ? fmt.title : "Raw transcript (no AI)"}  ·  ⌘F to change`,
-    ...(live ? ["", "---", "**Transcript so far**", "", live] : []),
-    "",
-    "**⏎** stop & transcribe · **⌃C** cancel · **Esc** keeps recording (reopen to stop).",
-  ].join("\n");
+  const live = resolveLiveTranscript(readStream(), st);
+  const md = buildRecordingMarkdown({ elapsed, level, fmt, live });
 
   return (
     <Detail
