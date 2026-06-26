@@ -123,7 +123,7 @@ pcall(require, "hs.ipc")   -- enables the `hs` CLI for introspection
 -- Forward declarations (several of these reference each other).
 local setState, notify, tmpWav, fmtTime, dbg
 local showHUD, updateHUD, destroyHUD, soxStream
-local parseStatus, onResult, runEngine, refreshModes
+local parseStatus, onResult, runEngine, refreshModes, resultPanelHandlers
 local onRecDone, startRecording, stopRecording, toggleDictate
 local pickMode, dictateWithMode, typePrompt
 local closeResult, resultClick, showResult
@@ -375,6 +375,31 @@ function runEngine(argv)
     end)
 end
 
+-- The result panel's button actions, injected into showResult so the panel
+-- stays a pure view. This is the only place that wires the panel back to the
+-- engine (the "Email" reformat re-runs runEngine) — keeping that edge here, in
+-- the engine client, instead of inside the panel itself.
+function resultPanelHandlers()
+  return {
+    onCopy = function(text)
+      hs.pasteboard.setContents(text)
+      closeResult()
+      hs.alert.show("Copied ✓", 0.6)
+    end,
+    onPaste = function(text)
+      hs.pasteboard.setContents(text)
+      closeResult()
+      hs.timer.doAfter(0.08, function() hs.eventtap.keyStroke({ "cmd" }, "v") end)
+    end,
+    onEmail = function(text)
+      closeResult()
+      VB.captureFlags = { "--mode", "email" }
+      runEngine({ "text", text })
+    end,
+    onDiscard = function() closeResult() end,
+  }
+end
+
 -- Load the rewrite-mode catalog (built-in + custom [intent]) from the engine,
 -- so the picker reflects config edits. Async; falls back to BUILTIN_CATALOG.
 function refreshModes()
@@ -517,31 +542,29 @@ end
 function closeResult()
   if VB.resultTimer then VB.resultTimer:stop(); VB.resultTimer = nil end
   if VB.result then VB.result:delete(); VB.result = nil end
+  VB.resultHandlers = nil
 end
+
+-- Map a button id to the injected handler the caller supplied via showResult.
+local RESULT_ACTIONS = { copy = "onCopy", paste = "onPaste",
+                         email = "onEmail", discard = "onDiscard" }
 
 function resultClick(_, msg, id)
   if msg ~= "mouseUp" then return end
   local text = VB.resultText or ""
-  if id == "copy" then
-    hs.pasteboard.setContents(text)
-    closeResult()
-    hs.alert.show("Copied ✓", 0.6)
-  elseif id == "paste" then
-    hs.pasteboard.setContents(text)
-    closeResult()
-    hs.timer.doAfter(0.08, function() hs.eventtap.keyStroke({ "cmd" }, "v") end)
-  elseif id == "email" then
-    closeResult()
-    VB.captureFlags = { "--mode", "email" }
-    runEngine({ "text", text })
-  elseif id == "discard" then
-    closeResult()
-  end
+  local handlers = VB.resultHandlers or {}
+  local fn = handlers[RESULT_ACTIONS[id]]
+  if fn then fn(text) end
 end
 
-function showResult(text, llmFailed)
+-- showResult(text, llmFailed, handlers): the panel is now a pure view. The
+-- caller injects what each button does via handlers = { onCopy, onPaste,
+-- onEmail, onDiscard } (each receives the result text). The panel never reaches
+-- back into the engine (no runEngine here) — the dependency is one-way.
+function showResult(text, llmFailed, handlers)
   closeResult()
   VB.resultText = text or ""
+  VB.resultHandlers = handlers or {}
   local W, H = 380, 184
   local preview = VB.resultText:gsub("%s+", " ")
   if #preview > 300 then preview = preview:sub(1, 300) .. "…" end
@@ -985,7 +1008,8 @@ ensureDaemon()      -- start (or reuse) the warm background engine
 --   voicebridgeTest()            -> render the result panel in isolation
 --   voicebridgeProcess("a.wav")  -> run the full engine pipeline on a wav file
 _G.voicebridgeTest = function()
-  local ok, e = pcall(showResult, "TEST result panel — Copy / Paste / Email / ✕ should work.", false)
+  local ok, e = pcall(showResult, "TEST result panel — Copy / Paste / Email / ✕ should work.",
+    false, resultPanelHandlers())
   return ok and "panel shown" or ("ERROR: " .. tostring(e))
 end
 _G.voicebridgeProcess = function(wav)
