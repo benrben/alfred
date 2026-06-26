@@ -6,3 +6,6 @@ numpy>=1.24
 # Strict on-device intent backend (backend = "local"). First run downloads the
 # configured local_model (e.g. Qwen2.5-3B-Instruct-4bit, ~2GB).
 mlx-lm>=0.18.0
+# Round-trip TOML editing for set-intent/set-model/set-processing — preserves the
+# user's comments and formatting when the front-end writes a setting.
+tomlkit>=0.12

@@ -1573,35 +1573,26 @@ def cmd_set_intent(args) -> int:
 
 def _set_config_kv(path: Path, section: str, key: str, value_toml: str) -> None:
     """Set `key = value_toml` inside [section] in a TOML file, in place (keeps a
-    .bak). Creates the section/key if missing; replaces the value if present."""
-    import re
+    .bak). Creates the section/key if missing; replaces the value if present.
+
+    value_toml is a TOML-encoded value (e.g. '"email"', 'true'); we round-trip
+    the document with tomlkit so existing comments and formatting are preserved."""
+    import tomlkit
     text = path.read_text(encoding="utf-8") if path.is_file() else ""
-    lines = text.splitlines()
-    line = f"{key} = {value_toml}"
-    hdr = f"[{section}]"
-    si = next((i for i, ln in enumerate(lines) if ln.strip() == hdr), None)
-    if si is None:
-        if lines and lines[-1].strip():
-            lines.append("")
-        lines += [hdr, line]
-    else:
-        ki = None
-        j = si + 1
-        while j < len(lines) and not lines[j].lstrip().startswith("["):
-            if re.match(r"^\s*%s\s*=" % re.escape(key), lines[j]):
-                ki = j
-                break
-            j += 1
-        if ki is not None:
-            lines[ki] = line
-        else:
-            lines.insert(si + 1, line)
+    doc = tomlkit.parse(text)
+    # Parse the encoded value back to a typed tomlkit value (string, bool, ...).
+    value = tomlkit.parse(f"_ = {value_toml}")["_"]
+    table = doc.get(section)
+    if table is None:
+        table = tomlkit.table()
+        doc[section] = table
+    table[key] = value
     if path.is_file():
         try:
             path.with_suffix(path.suffix + ".bak").write_text(text, encoding="utf-8")
         except OSError:
             pass
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.write_text(tomlkit.dumps(doc), encoding="utf-8")
 
 
 def cmd_set_model(args) -> int:
