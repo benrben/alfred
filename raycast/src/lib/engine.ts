@@ -123,8 +123,129 @@ export interface EngineResult {
 
 const DAEMON_TIMEOUT_MS = 120_000;
 
+// ---- Engine CONTRACT -------------------------------------------------------
+// The engine describes its own wire shape (file paths, daemon coords, status
+// line) via `voicebridge.py contract` (and GET /contract on the warm daemon).
+// We consume it so the file paths/port aren't hard-coded here — with a literal
+// fallback to the historical values so an older engine still works.
+
+export interface ContractStatusLine {
+  sentinel: string;
+  sep: string;
+  kinds?: Record<string, string[]>;
+  llm_failed_suffix?: string;
+}
+
+export interface ContractFile {
+  path: string;
+  schema?: Record<string, unknown>;
+}
+
+export interface Contract {
+  schema_version: number;
+  daemon: { host: string; port: number; url?: string; [k: string]: unknown };
+  status_line: ContractStatusLine;
+  files: {
+    progress: ContractFile;
+    stream: ContractFile;
+    history: ContractFile;
+    [k: string]: ContractFile;
+  };
+  config_search?: string[];
+}
+
+/** The literal contract baked in here, used when the engine can't supply one
+ * (older engine, daemon down + spawn failure). Mirrors today's hard-coded
+ * paths/port so behaviour is unchanged on the fallback path. */
+export function fallbackContract(): Contract {
+  return {
+    schema_version: 1,
+    daemon: { host: "127.0.0.1", port: 8763, url: "http://127.0.0.1:8763/" },
+    status_line: {
+      sentinel: "VB_STATUS",
+      sep: "\t",
+      kinds: {
+        copied: [],
+        saved: ["path"],
+        empty: [],
+        streaming: [],
+        error: ["subtype"],
+      },
+      llm_failed_suffix: "llm_failed",
+    },
+    files: {
+      progress: { path: "~/.voicebridge/progress.json" },
+      stream: { path: "~/.voicebridge/stream.json" },
+      history: { path: "~/.voicebridge/history/history.jsonl" },
+    },
+    config_search: ["~/.config/voicebridge/config.toml"],
+  };
+}
+
+/** Resolve a contract file path to an absolute path, expanding a leading ~. */
+export function contractPath(contract: Contract, key: string): string {
+  const raw = contract.files?.[key]?.path;
+  if (!raw) return expandHome(fallbackContract().files[key]?.path ?? "");
+  return expandHome(raw);
+}
+
+// Cached contract: undefined = not yet fetched; null = fetched and failed (so
+// we stop re-spawning and use the literal fallback for the rest of the run).
+let cachedContract: Contract | undefined;
+let contractInFlight: Promise<Contract> | undefined;
+
+function parseContract(out: string): Contract | null {
+  try {
+    const c = JSON.parse(out) as Contract;
+    if (c && c.files && c.daemon && c.status_line) return c;
+  } catch {
+    // not JSON / malformed
+  }
+  return null;
+}
+
+/** Fetch the engine's contract once and cache it. Prefers GET /contract on the
+ * warm daemon; falls back to the one-shot `contract` CLI. Returns the literal
+ * fallbackContract() if neither works (older engine), so callers never throw. */
+export async function loadContract(): Promise<Contract> {
+  if (cachedContract) return cachedContract;
+  if (contractInFlight) return contractInFlight;
+  contractInFlight = (async () => {
+    // 1) warm daemon, if up
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemonPort()}/contract`, {
+        signal: AbortSignal.timeout(2000),
+      });
+      if (res.ok) {
+        const c = parseContract(await res.text());
+        if (c) return (cachedContract = c);
+      }
+    } catch {
+      // daemon down or no /contract route — try the one-shot CLI
+    }
+    // 2) one-shot CLI `contract`
+    const one = await runOneShot(["contract"]);
+    const c = one.code === 0 ? parseContract(one.out) : null;
+    return (cachedContract = c ?? fallbackContract());
+  })();
+  try {
+    return await contractInFlight;
+  } finally {
+    contractInFlight = undefined;
+  }
+}
+
+/** The cached contract if already loaded, else the literal fallback. Lets the
+ * synchronous *File()/daemonPort() helpers derive paths without awaiting; a
+ * background loadContract() warms the cache so later polls use the real one. */
+function currentContract(): Contract {
+  return cachedContract ?? fallbackContract();
+}
+
 export function daemonPort(): string {
-  return (getPrefs().daemonPort || "8763").trim();
+  const pref = (getPrefs().daemonPort || "").trim();
+  if (pref) return pref;
+  return String(currentContract().daemon.port || 8763);
 }
 
 /** Quick health check of the warm daemon (GET /). */
@@ -140,6 +261,11 @@ export async function pingDaemon(): Promise<boolean> {
 }
 
 export async function callEngine(argv: string[]): Promise<EngineResult> {
+  // Warm the contract cache opportunistically (fire-and-forget) so the
+  // synchronous *File()/daemonPort() helpers derive real paths on later polls.
+  // Never blocks the call and never throws (loadContract resolves to the
+  // literal fallback on any error).
+  if (cachedContract === undefined) void loadContract();
   const prefs = getPrefs();
   const port = (prefs.daemonPort || "8763").trim();
   const url = `http://127.0.0.1:${port}/`;
@@ -341,11 +467,15 @@ export async function setDefaultFormat(fmt: FormatChoice): Promise<boolean> {
   return (res.out || "").includes("saved");
 }
 
-/** Parse the engine's machine-readable last line: "VB_STATUS\tkind[\textra…]". */
+/** Parse the engine's machine-readable last line: "VB_STATUS\tkind[\textra…]".
+ * Sentinel/separator come from the contract's status_line (literal fallback). */
 export function parseStatus(out: string): string[] | null {
-  const prefix = "VB_STATUS\t";
+  const sl = currentContract().status_line;
+  const sentinel = sl?.sentinel || "VB_STATUS";
+  const sep = sl?.sep || "\t";
+  const prefix = sentinel + sep;
   for (const line of out.split(/\r?\n/)) {
-    if (line.startsWith(prefix)) return line.slice(prefix.length).split("\t");
+    if (line.startsWith(prefix)) return line.slice(prefix.length).split(sep);
   }
   return null;
 }
@@ -362,7 +492,9 @@ export async function resolveDelivery(
 ): Promise<DeliveredResult> {
   const parts = parseStatus(res.out);
   const kind = parts?.[0] ?? (res.code === 0 ? "unknown" : "error");
-  const llmFailed = !!parts && parts[parts.length - 1] === "llm_failed";
+  const llmSuffix =
+    currentContract().status_line?.llm_failed_suffix || "llm_failed";
+  const llmFailed = !!parts && parts[parts.length - 1] === llmSuffix;
   if (kind === "copied") {
     const text = (await Clipboard.readText()) ?? "";
     return { kind, text, llmFailed };
@@ -396,7 +528,7 @@ export interface HistoryItem {
 }
 
 export function historyFile(): string {
-  return join(homedir(), ".voicebridge", "history", "history.jsonl");
+  return contractPath(currentContract(), "history");
 }
 
 export function readHistory(limit = 50): HistoryItem[] {
@@ -436,7 +568,7 @@ export interface Progress {
 }
 
 export function progressFile(): string {
-  return join(homedir(), ".voicebridge", "progress.json");
+  return contractPath(currentContract(), "progress");
 }
 
 /** The engine's current pipeline progress, or null if none/unreadable. */
@@ -465,7 +597,7 @@ export interface StreamState {
 }
 
 export function streamFile(): string {
-  return join(homedir(), ".voicebridge", "stream.json");
+  return contractPath(currentContract(), "stream");
 }
 
 /** The engine's live partial transcript during a streamed recording, or null. */
@@ -474,7 +606,8 @@ export function readStream(): StreamState | null {
   if (!existsSync(f)) return null;
   try {
     const s = JSON.parse(readFileSync(f, "utf8")) as StreamState;
-    if (s && typeof s.transcript === "string" && typeof s.ts === "number") return s;
+    if (s && typeof s.transcript === "string" && typeof s.ts === "number")
+      return s;
   } catch {
     // ignore mid-write / malformed
   }
