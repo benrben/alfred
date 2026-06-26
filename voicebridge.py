@@ -1101,46 +1101,96 @@ def _macos_tool(name: str) -> str:
     return name
 
 
+# --- Delivery sink: the three side effects deliver() routes between ----------
+# deliver() decides WHAT to do (copy vs save, paste or not); the sink does the
+# actual I/O. MacosSink is the default (pbcopy / osascript / file write); tests
+# inject a fake sink to assert routing without touching the clipboard or disk.
+
+class Sink:
+    """The output side effects. Subclasses implement the three primitives."""
+
+    def copy(self, text: str) -> None:
+        raise NotImplementedError
+
+    def write_file(self, text: str, path: str) -> str:
+        raise NotImplementedError
+
+    def paste(self) -> None:
+        raise NotImplementedError
+
+
+class MacosSink(Sink):
+    """Real macOS delivery: clipboard via pbcopy, Cmd+V paste via osascript,
+    and a plain UTF-8 file write."""
+
+    def copy(self, text: str) -> None:
+        # We hand pbcopy UTF-8 bytes, but pbcopy decodes its stdin using the
+        # locale (LANG / __CF_USER_TEXT_ENCODING). A GUI launcher
+        # (Raycast/Hammerspoon) can spawn us with no/!UTF-8 locale, in which
+        # case pbcopy reads our UTF-8 as Mac Roman and the clipboard gets
+        # mojibake (Hebrew -> "◊©◊ú◊ï◊ù"). Force a UTF-8 locale for pbcopy so it
+        # always matches the bytes we send.
+        env = os.environ.copy()
+        env["LANG"] = "en_US.UTF-8"
+        env["LC_ALL"] = "en_US.UTF-8"
+        subprocess.run([_macos_tool("pbcopy")], input=text, text=True,
+                       encoding="utf-8", env=env, check=True)
+
+    def write_file(self, text: str, path: str) -> str:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+        return str(p)
+
+    def paste(self) -> None:
+        subprocess.run(
+            [_macos_tool("osascript"), "-e",
+             'tell application "System Events" to keystroke "v" using command down'],
+            check=False,
+        )
+
+
+# The default sink, shared by the thin module-level wrappers below.
+_SINK: Sink = MacosSink()
+
+
+def _save_path(cfg: dict) -> str:
+    """The destination path for a saved result, derived from [output] config.
+    Pure: computes the path (dir + timestamped name); the sink does the write."""
+    d = Path(cfg["output"]["save_dir"]).expanduser()
+    ext = "md" if cfg["output"]["save_format"] == "md" else "txt"
+    ts = _dt.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    return str(d / f"voicebridge_{ts}.{ext}")
+
+
+# Thin wrappers kept for the existing call sites (e.g. history re-copy) — they
+# delegate to the shared default sink, so behaviour is unchanged.
 def copy_clipboard(text: str) -> None:
-    # We hand pbcopy UTF-8 bytes, but pbcopy decodes its stdin using the locale
-    # (LANG / __CF_USER_TEXT_ENCODING). A GUI launcher (Raycast/Hammerspoon) can
-    # spawn us with no/!UTF-8 locale, in which case pbcopy reads our UTF-8 as
-    # Mac Roman and the clipboard gets mojibake (Hebrew -> "◊©◊ú◊ï◊ù"). Force a
-    # UTF-8 locale for pbcopy so it always matches the bytes we send.
-    env = os.environ.copy()
-    env["LANG"] = "en_US.UTF-8"
-    env["LC_ALL"] = "en_US.UTF-8"
-    subprocess.run([_macos_tool("pbcopy")], input=text, text=True,
-                   encoding="utf-8", env=env, check=True)
+    _SINK.copy(text)
 
 
 def auto_paste() -> None:
-    subprocess.run(
-        [_macos_tool("osascript"), "-e",
-         'tell application "System Events" to keystroke "v" using command down'],
-        check=False,
-    )
+    _SINK.paste()
 
 
 def save_to_file(text: str, cfg: dict) -> str:
-    d = Path(cfg["output"]["save_dir"]).expanduser()
-    d.mkdir(parents=True, exist_ok=True)
-    ext = "md" if cfg["output"]["save_format"] == "md" else "txt"
-    ts = _dt.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    path = d / f"voicebridge_{ts}.{ext}"
-    path.write_text(text, encoding="utf-8")
-    return str(path)
+    return _SINK.write_file(text, _save_path(cfg))
 
 
-def deliver(text: str, cfg: dict, do_paste: bool) -> tuple[str, str | None]:
+def deliver(text: str, cfg: dict, do_paste: bool,
+            sink: Sink | None = None) -> tuple[str, str | None]:
+    """Pure routing over an injected sink: empty -> nothing; over the size
+    threshold -> save to a file; otherwise copy (and paste if asked). Returns
+    (kind, path) where path is set only for the 'saved' kind."""
+    sink = sink or MacosSink()
     if not text.strip():
         return "empty", None
     threshold = int(cfg["output"]["size_threshold"])
     if threshold > 0 and len(text) > threshold:      # 0 = never save, always copy
-        return "saved", save_to_file(text, cfg)
-    copy_clipboard(text)
+        return "saved", sink.write_file(text, _save_path(cfg))
+    sink.copy(text)
     if do_paste:
-        auto_paste()
+        sink.paste()
     return "copied", None
 
 
