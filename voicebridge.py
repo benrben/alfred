@@ -129,6 +129,89 @@ CONFIG_SEARCH = [
     Path(__file__).resolve().parent / "config.toml",
 ]
 
+# Default port for the warm `serve` daemon (also the argparse default below).
+DAEMON_PORT = 8763
+
+
+# ----------------------------------------------------------------------------
+# CONTRACT — the single source of IPC truth
+# ----------------------------------------------------------------------------
+# Everything the two front-ends (Hammerspoon / Raycast) need to talk to this
+# engine: the daemon's HTTP shape, the VB_STATUS status-line grammar, the state
+# files it writes (their paths + JSON schema), and where config is searched.
+# The writers below DERIVE their paths/format from this dict, so no path string
+# or status sentinel is duplicated. `contract_paths()` expands the "~/..."
+# templates (honouring [history].dir). Exposed via `voicebridge.py contract`
+# and GET /contract so a front-end can read it instead of hard-coding.
+CONTRACT: dict = {
+    "schema_version": 1,
+    "daemon": {
+        "host": "127.0.0.1",
+        "port": DAEMON_PORT,
+        "url": "http://127.0.0.1:{port}/",
+        "request": {"method": "POST", "path": "/", "body": {"argv": ["<str>"]}},
+        "response": {"code": "int", "out": "str"},
+        "health": {"method": "GET", "path": "/"},
+        "contract": {"method": "GET", "path": "/contract"},
+    },
+    "status_line": {
+        "sentinel": STATUS,
+        "sep": "\t",
+        "kinds": {
+            "copied": [],
+            "saved": ["path"],
+            "empty": [],
+            "streaming": [],
+            "error": ["subtype"],
+        },
+        "error_subtypes": ["audio_not_found", "stt_failed", "llm_failed",
+                           "runtime"],
+        "llm_failed_suffix": "llm_failed",
+    },
+    "files": {
+        "progress": {
+            "path": "~/.voicebridge/progress.json",
+            "schema": {"phase": "str", "label": "str", "ts": "int_epoch_ms",
+                       "start": "int_epoch_ms",
+                       "steps": [{"label": "str", "ms": "int"}]},
+            "phases": ["starting", "transcribing", "processing", "delivering",
+                       "done", "error", "empty"],
+        },
+        "stream": {
+            "path": "~/.voicebridge/stream.json",
+            "schema": {"transcript": "str", "recording": "bool",
+                       "done": "bool", "ts": "int_epoch_ms"},
+        },
+        "history": {
+            "path": str(Path(DEFAULTS["history"]["dir"]) / "history.jsonl"),
+            "format": "jsonl",
+            "dir_config": "[history].dir",
+            "schema": {"ts": "str_iso_seconds", "source": "str", "chars": "int",
+                       "text": "str"},
+        },
+    },
+    "config_search": [
+        "~/.config/voicebridge/config.toml",
+        "<engine_dir>/config.toml",
+    ],
+}
+
+
+def contract_paths(cfg: dict | None = None) -> dict:
+    """Expand the CONTRACT's "~/..."-style file path templates to absolute Paths.
+
+    Single source of truth for the engine's state-file locations. The history
+    path honours the [history].dir override when a config is given; progress and
+    stream are fixed under ~/.voicebridge."""
+    files = CONTRACT["files"]
+    hist_dir = ((cfg or {}).get("history", {}) or {}).get("dir") \
+        or DEFAULTS["history"]["dir"]
+    return {
+        "progress": Path(files["progress"]["path"]).expanduser(),
+        "stream": Path(files["stream"]["path"]).expanduser(),
+        "history": Path(hist_dir).expanduser() / "history.jsonl",
+    }
+
 
 def _deep_merge(base: dict, over: dict) -> dict:
     out = dict(base)
@@ -283,7 +366,7 @@ def _silence_cut(buf, target: int, hard_max: int) -> int:
 
 
 def _stream_path() -> Path:
-    return Path.home() / ".voicebridge" / "stream.json"
+    return contract_paths()["stream"]
 
 
 class StreamSession:
@@ -1066,7 +1149,7 @@ def deliver(text: str, cfg: dict, do_paste: bool) -> tuple[str, str | None]:
 # ----------------------------------------------------------------------------
 
 def history_path(cfg: dict) -> Path:
-    return Path(cfg["history"]["dir"]).expanduser() / "history.jsonl"
+    return contract_paths(cfg)["history"]
 
 
 def history_append(text: str, cfg: dict, source: str) -> None:
@@ -1089,7 +1172,8 @@ def history_append(text: str, cfg: dict, source: str) -> None:
 # ----------------------------------------------------------------------------
 
 def print_status(*parts: str) -> None:
-    print(STATUS + "\t" + "\t".join(parts))
+    sl = CONTRACT["status_line"]
+    print(sl["sentinel"] + sl["sep"] + sl["sep"].join(parts))
 
 
 # ----------------------------------------------------------------------------
@@ -1102,7 +1186,7 @@ def _now_ms() -> int:
 
 
 def _progress_path() -> Path:
-    return Path.home() / ".voicebridge" / "progress.json"
+    return contract_paths()["progress"]
 
 
 class _Progress:
@@ -1433,7 +1517,7 @@ def cmd_set_intent(args) -> int:
             pass
     path.write_text(new_text, encoding="utf-8")
     ok = any(m["key"] == key for m in mode_catalog(load_config(str(path))))
-    print(STATUS + "\t" + ("saved" if ok else "error"))
+    print_status("saved" if ok else "error")
     return 0 if ok else 1
 
 
@@ -1476,7 +1560,7 @@ def cmd_set_model(args) -> int:
     path = _config_target(args)
     path.parent.mkdir(parents=True, exist_ok=True)
     _set_config_kv(path, "llm", key, _toml_str(args.model or ""))
-    print(STATUS + "\tsaved")
+    print_status("saved")
     return 0
 
 
@@ -1492,7 +1576,7 @@ def cmd_set_processing(args) -> int:
         val = getattr(args, stage)
         if val is not None:
             _set_config_kv(path, "processing", stage, "true" if val else "false")
-    print(STATUS + "\tsaved")
+    print_status("saved")
     return 0
 
 
@@ -1530,6 +1614,13 @@ def cmd_settings(args) -> int:
             "translate_via": proc.get("translate_via", "llm"),
         },
     }))
+    return 0
+
+
+def cmd_contract(args) -> int:
+    """Print the IPC CONTRACT (the single source of truth the front-ends read):
+    the daemon's HTTP shape, the VB_STATUS grammar, and the state files."""
+    print(json.dumps(CONTRACT, indent=2))
     return 0
 
 
@@ -1699,8 +1790,11 @@ def cmd_serve(args) -> int:
             self.end_headers()
             self.wfile.write(data)
 
-        def do_GET(self):                              # health check
-            self._json(200, {"ok": True})
+        def do_GET(self):
+            if self.path == "/contract":               # the IPC contract
+                self._json(200, CONTRACT)
+            else:                                       # health check
+                self._json(200, {"ok": True})
 
         def do_POST(self):
             n = int(self.headers.get("Content-Length", 0))
@@ -1795,7 +1889,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_si.set_defaults(func=cmd_set_intent)
 
     p_serve = sub.add_parser("serve", help="run a warm background engine (localhost HTTP)")
-    p_serve.add_argument("--port", type=int, default=8763)
+    p_serve.add_argument("--port", type=int, default=DAEMON_PORT)
     p_serve.add_argument("--config")
     p_serve.set_defaults(func=cmd_serve)
 
@@ -1821,6 +1915,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc = sub.add_parser("doctor", help="check the environment")
     p_doc.add_argument("--config")
     p_doc.set_defaults(func=cmd_doctor)
+
+    p_con = sub.add_parser("contract",
+                           help="print the IPC contract (state files + daemon "
+                                "API + status grammar) as JSON")
+    p_con.set_defaults(func=cmd_contract)
     return ap
 
 
