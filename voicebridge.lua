@@ -124,6 +124,7 @@ pcall(require, "hs.ipc")   -- enables the `hs` CLI for introspection
 local setState, notify, tmpWav, fmtTime, dbg
 local showHUD, updateHUD, destroyHUD, soxStream
 local parseStatus, onResult, runEngine, refreshModes, resultPanelHandlers
+local resolveConfigPath
 local onRecDone, startRecording, stopRecording, toggleDictate
 local pickMode, dictateWithMode, typePrompt
 local closeResult, resultClick, showResult
@@ -422,6 +423,24 @@ function refreshModes()
   t:start()
 end
 
+-- Ask the engine where its config lives instead of hard-coding the path. The
+-- `contract` command emits JSON including `config_search` (the ordered list of
+-- paths the engine actually consults); we open the first one. Only if the
+-- contract call is unavailable do we fall back to the previous literal path.
+function resolveConfigPath()
+  local out = hs.execute("HOME='" .. HOME .. "' LANG='en_US.UTF-8' LC_ALL='en_US.UTF-8'" ..
+    " PYTHONUTF8=1 PATH='" .. USER_PATH .. "' '" .. PYTHON .. "' '" .. SCRIPT .. "' contract 2>/dev/null")
+  if out and #out > 0 then
+    local ok, c = pcall(hs.json.decode, out)
+    if ok and type(c) == "table" and type(c.config_search) == "table"
+       and type(c.config_search[1]) == "string" and #c.config_search[1] > 0 then
+      return c.config_search[1]
+    end
+  end
+  dbg("resolveConfigPath: contract unavailable, using literal fallback")
+  return HOME .. "/.config/voicebridge/config.toml"
+end
+
 -- ---- Dictation -----------------------------------------------------------
 
 function onRecDone()
@@ -696,7 +715,7 @@ function onWebMessage(message)
   elseif a == "copy" or a == "recopy" then
     hs.pasteboard.setContents(d.text or VB.resultText or "")   -- toast shown in-window
   elseif a == "editIntents" then
-    hs.execute("open -t " .. HOME .. "/.config/voicebridge/config.toml 2>/dev/null || open -t '"
+    hs.execute("open -t '" .. resolveConfigPath() .. "' 2>/dev/null || open -t '"
       .. DIR .. "/config.example.toml'")
   elseif a == "reloadModes" then
     refreshModes()
@@ -983,7 +1002,8 @@ VB.menubar:setMenu(function()
         hs.execute("open ~/Documents/VoiceBridge 2>/dev/null || open ~/Documents")
       end },
     { title = "Edit config…", fn = function()
-        hs.execute("open -t ~/.config/voicebridge/config.toml 2>/dev/null || open -t '" .. DIR .. "/config.example.toml'")
+        hs.execute("open -t '" .. resolveConfigPath() .. "' 2>/dev/null || open -t '"
+          .. DIR .. "/config.example.toml'")
       end },
     { title = "Reload intent modes", fn = function() refreshModes() end },
     { title = "Restart engine (warm)", fn = function() restartDaemon() end },
