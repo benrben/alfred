@@ -1,6 +1,7 @@
 import { Action, ActionPanel, Detail, Icon, List } from "@raycast/api";
 import { useEffect, useState } from "react";
 import { HistoryItem, readHistory } from "./lib/engine";
+import { formatHistoryTitle, formatHistoryWhen } from "./lib/view-logic";
 
 export default function Command() {
   const [items, setItems] = useState<HistoryItem[]>([]);
@@ -24,16 +25,11 @@ export default function Command() {
         />
       ) : (
         items.map((item, i) => {
-          const title = item.text.replace(/\s+/g, " ").trim();
-          const when = (item.ts || "").replace("T", " ").slice(0, 16);
+          const when = formatHistoryWhen(item.ts);
           return (
             <List.Item
               key={`${item.ts}-${i}`}
-              title={
-                title.length > 60
-                  ? title.slice(0, 57) + "…"
-                  : title || "(empty)"
-              }
+              title={formatHistoryTitle(item.text)}
               accessories={[{ text: `${item.chars}c` }]}
               detail={
                 <List.Item.Detail
