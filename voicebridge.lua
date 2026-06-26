@@ -109,7 +109,9 @@ end
 -- Full login PATH so the engine (and the claude/codex it spawns) is found.
 -- Append the stock system dirs so pbcopy/osascript and Homebrew tools resolve
 -- even if the login shell trimmed PATH.
-local USER_PATH = (hs.execute('echo -n "$PATH"', true) or ""):gsub("%s+$", "")
+-- The only top-level `hs.*` that runs before the test-export seam below, so it
+-- is short-circuited under VB_LUA_TEST to keep the file loadable by plain lua.
+local USER_PATH = ((not os.getenv("VB_LUA_TEST") and hs.execute('echo -n "$PATH"', true)) or ""):gsub("%s+$", "")
 USER_PATH = USER_PATH .. ":/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
   .. ":" .. HOME .. "/.local/bin:" .. HOME .. "/.cargo/bin:" .. HOME .. "/.bun/bin"
 -- Force a UTF-8 locale so the engine doesn't fall back to mac-roman (which
@@ -968,6 +970,16 @@ function setModel(backend, model)
   VB.modelTask = t
   t:setEnvironment(TASK_ENV)
   t:start()
+end
+
+-- ---- Test-export seam ----------------------------------------------------
+-- Under VB_LUA_TEST this returns the PURE helpers (string/table/math only at
+-- call time) and bails out BEFORE any Hammerspoon runtime init runs, so plain
+-- `lua` can require the module and unit-test them. Zero effect when unset.
+if os.getenv("VB_LUA_TEST") then
+  return { parseStatus = parseStatus, buildModes = buildModes,
+           modesForJS = modesForJS, fmtTime = fmtTime,
+           RESULT_ACTIONS = RESULT_ACTIONS }
 end
 
 -- ---- Menu bar ------------------------------------------------------------
