@@ -123,7 +123,8 @@ pcall(require, "hs.ipc")   -- enables the `hs` CLI for introspection
 -- Forward declarations (several of these reference each other).
 local setState, notify, tmpWav, fmtTime, dbg
 local showHUD, updateHUD, destroyHUD, soxStream
-local parseStatus, onResult, runEngine, refreshModes
+local parseStatus, onResult, runEngine, refreshModes, resultPanelHandlers
+local resolveConfigPath
 local onRecDone, startRecording, stopRecording, toggleDictate
 local pickMode, dictateWithMode, typePrompt
 local closeResult, resultClick, showResult
@@ -375,6 +376,31 @@ function runEngine(argv)
     end)
 end
 
+-- The result panel's button actions, injected into showResult so the panel
+-- stays a pure view. This is the only place that wires the panel back to the
+-- engine (the "Email" reformat re-runs runEngine) — keeping that edge here, in
+-- the engine client, instead of inside the panel itself.
+function resultPanelHandlers()
+  return {
+    onCopy = function(text)
+      hs.pasteboard.setContents(text)
+      closeResult()
+      hs.alert.show("Copied ✓", 0.6)
+    end,
+    onPaste = function(text)
+      hs.pasteboard.setContents(text)
+      closeResult()
+      hs.timer.doAfter(0.08, function() hs.eventtap.keyStroke({ "cmd" }, "v") end)
+    end,
+    onEmail = function(text)
+      closeResult()
+      VB.captureFlags = { "--mode", "email" }
+      runEngine({ "text", text })
+    end,
+    onDiscard = function() closeResult() end,
+  }
+end
+
 -- Load the rewrite-mode catalog (built-in + custom [intent]) from the engine,
 -- so the picker reflects config edits. Async; falls back to BUILTIN_CATALOG.
 function refreshModes()
@@ -395,6 +421,24 @@ function refreshModes()
   VB.modesTask = t          -- retain so GC doesn't kill it before it returns
   t:setEnvironment(TASK_ENV)
   t:start()
+end
+
+-- Ask the engine where its config lives instead of hard-coding the path. The
+-- `contract` command emits JSON including `config_search` (the ordered list of
+-- paths the engine actually consults); we open the first one. Only if the
+-- contract call is unavailable do we fall back to the previous literal path.
+function resolveConfigPath()
+  local out = hs.execute("HOME='" .. HOME .. "' LANG='en_US.UTF-8' LC_ALL='en_US.UTF-8'" ..
+    " PYTHONUTF8=1 PATH='" .. USER_PATH .. "' '" .. PYTHON .. "' '" .. SCRIPT .. "' contract 2>/dev/null")
+  if out and #out > 0 then
+    local ok, c = pcall(hs.json.decode, out)
+    if ok and type(c) == "table" and type(c.config_search) == "table"
+       and type(c.config_search[1]) == "string" and #c.config_search[1] > 0 then
+      return c.config_search[1]
+    end
+  end
+  dbg("resolveConfigPath: contract unavailable, using literal fallback")
+  return HOME .. "/.config/voicebridge/config.toml"
 end
 
 -- ---- Dictation -----------------------------------------------------------
@@ -517,31 +561,29 @@ end
 function closeResult()
   if VB.resultTimer then VB.resultTimer:stop(); VB.resultTimer = nil end
   if VB.result then VB.result:delete(); VB.result = nil end
+  VB.resultHandlers = nil
 end
+
+-- Map a button id to the injected handler the caller supplied via showResult.
+local RESULT_ACTIONS = { copy = "onCopy", paste = "onPaste",
+                         email = "onEmail", discard = "onDiscard" }
 
 function resultClick(_, msg, id)
   if msg ~= "mouseUp" then return end
   local text = VB.resultText or ""
-  if id == "copy" then
-    hs.pasteboard.setContents(text)
-    closeResult()
-    hs.alert.show("Copied ✓", 0.6)
-  elseif id == "paste" then
-    hs.pasteboard.setContents(text)
-    closeResult()
-    hs.timer.doAfter(0.08, function() hs.eventtap.keyStroke({ "cmd" }, "v") end)
-  elseif id == "email" then
-    closeResult()
-    VB.captureFlags = { "--mode", "email" }
-    runEngine({ "text", text })
-  elseif id == "discard" then
-    closeResult()
-  end
+  local handlers = VB.resultHandlers or {}
+  local fn = handlers[RESULT_ACTIONS[id]]
+  if fn then fn(text) end
 end
 
-function showResult(text, llmFailed)
+-- showResult(text, llmFailed, handlers): the panel is now a pure view. The
+-- caller injects what each button does via handlers = { onCopy, onPaste,
+-- onEmail, onDiscard } (each receives the result text). The panel never reaches
+-- back into the engine (no runEngine here) — the dependency is one-way.
+function showResult(text, llmFailed, handlers)
   closeResult()
   VB.resultText = text or ""
+  VB.resultHandlers = handlers or {}
   local W, H = 380, 184
   local preview = VB.resultText:gsub("%s+", " ")
   if #preview > 300 then preview = preview:sub(1, 300) .. "…" end
@@ -673,7 +715,7 @@ function onWebMessage(message)
   elseif a == "copy" or a == "recopy" then
     hs.pasteboard.setContents(d.text or VB.resultText or "")   -- toast shown in-window
   elseif a == "editIntents" then
-    hs.execute("open -t " .. HOME .. "/.config/voicebridge/config.toml 2>/dev/null || open -t '"
+    hs.execute("open -t '" .. resolveConfigPath() .. "' 2>/dev/null || open -t '"
       .. DIR .. "/config.example.toml'")
   elseif a == "reloadModes" then
     refreshModes()
@@ -960,7 +1002,8 @@ VB.menubar:setMenu(function()
         hs.execute("open ~/Documents/VoiceBridge 2>/dev/null || open ~/Documents")
       end },
     { title = "Edit config…", fn = function()
-        hs.execute("open -t ~/.config/voicebridge/config.toml 2>/dev/null || open -t '" .. DIR .. "/config.example.toml'")
+        hs.execute("open -t '" .. resolveConfigPath() .. "' 2>/dev/null || open -t '"
+          .. DIR .. "/config.example.toml'")
       end },
     { title = "Reload intent modes", fn = function() refreshModes() end },
     { title = "Restart engine (warm)", fn = function() restartDaemon() end },
@@ -985,7 +1028,8 @@ ensureDaemon()      -- start (or reuse) the warm background engine
 --   voicebridgeTest()            -> render the result panel in isolation
 --   voicebridgeProcess("a.wav")  -> run the full engine pipeline on a wav file
 _G.voicebridgeTest = function()
-  local ok, e = pcall(showResult, "TEST result panel — Copy / Paste / Email / ✕ should work.", false)
+  local ok, e = pcall(showResult, "TEST result panel — Copy / Paste / Email / ✕ should work.",
+    false, resultPanelHandlers())
   return ok and "panel shown" or ("ERROR: " .. tostring(e))
 end
 _G.voicebridgeProcess = function(wav)
