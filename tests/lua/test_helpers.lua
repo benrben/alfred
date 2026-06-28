@@ -148,6 +148,171 @@ do
   eq(n, 4, "RESULT_ACTIONS has exactly 4 entries")
 end
 
+-- =====================================================================
+-- resultDispatch (hs-result-panel): a button id routes to its injected
+-- handler, which receives the result text; returns the handler name fired.
+-- =====================================================================
+do
+  local fired, got = nil, nil
+  local handlers = {
+    onCopy    = function(t) fired = "onCopy";    got = t end,
+    onPaste   = function(t) fired = "onPaste";   got = t end,
+    onEmail   = function(t) fired = "onEmail";   got = t end,
+    onDiscard = function(t) fired = "onDiscard"; got = t end,
+  }
+  eq(H.resultDispatch("copy", handlers, "hello"), "onCopy", "dispatch copy -> onCopy")
+  eq(fired, "onCopy", "copy fired onCopy")
+  eq(got, "hello", "handler received the result text")
+
+  eq(H.resultDispatch("paste", handlers, "x"), "onPaste", "dispatch paste -> onPaste")
+  eq(H.resultDispatch("email", handlers, "x"), "onEmail", "dispatch email -> onEmail")
+  eq(H.resultDispatch("discard", handlers, "x"), "onDiscard", "dispatch discard -> onDiscard")
+
+  -- Unknown id and missing handler are both no-ops returning nil.
+  eq(H.resultDispatch("nope", handlers, "x"), nil, "unknown id -> nil")
+  eq(H.resultDispatch("copy", {}, "x"), nil, "missing handler -> nil")
+  eq(H.resultDispatch("copy", nil, "x"), nil, "nil handlers -> nil (no crash)")
+end
+
+-- =====================================================================
+-- iconForState (hs-recording): the menubar glyph per state, idle fallback.
+-- =====================================================================
+do
+  eq(H.iconForState("idle"), "🎙️", "iconForState(idle)")
+  eq(H.iconForState("recording"), "🔴", "iconForState(recording)")
+  eq(H.iconForState("processing"), "⏳", "iconForState(processing)")
+  eq(H.iconForState("garbage"), "🎙️", "iconForState(unknown) falls back to idle")
+  eq(H.iconForState(nil), "🎙️", "iconForState(nil) falls back to idle")
+end
+
+-- =====================================================================
+-- soxLevel (hs-recording): parse a sox `-S` stderr blob into the PEAK VU
+-- level (0..1). The meter is the bracketed segment containing a '|'; fill =
+-- non-space, non-'|' chars over the segment width.
+-- =====================================================================
+do
+  eq(H.soxLevel(nil), nil, "soxLevel(nil) -> nil")
+  eq(H.soxLevel(""), nil, "soxLevel(empty) -> nil")
+  eq(H.soxLevel("In:0.00% 00:00:01 [no meter here]"), nil,
+     "soxLevel without a '|' segment -> nil")
+
+  -- A meter of width 10 with 5 filled '=' chars -> 0.5. (Bracket content must
+  -- contain a '|' to be recognised as the VU segment.)
+  local lvl = H.soxLevel("In: 12% [=====|    ]")
+  check(lvl ~= nil and math.abs(lvl - 5/10) < 1e-9,
+        "soxLevel fill 5 of 10 -> 0.5 (got " .. tostring(lvl) .. ")")
+
+  -- All filled (only the '|' is "empty"): 9 of 10 -> 0.9.
+  local hot = H.soxLevel("[=========|]")
+  check(hot ~= nil and math.abs(hot - 9/10) < 1e-9,
+        "soxLevel nearly full -> 0.9 (got " .. tostring(hot) .. ")")
+
+  -- Silence: only the divider, no fill -> 0.
+  local quiet = H.soxLevel("[    |     ]")
+  check(quiet ~= nil and math.abs(quiet) < 1e-9,
+        "soxLevel silence -> 0 (got " .. tostring(quiet) .. ")")
+
+  -- Across multiple lines, the PEAK wins.
+  local peak = H.soxLevel("[==|       ]\n[========|=]\n[===|      ]")
+  check(peak ~= nil and peak > 0.8, "soxLevel takes the peak across lines")
+end
+
+-- =====================================================================
+-- buildCaptureFlags (hs-app-window): mode flags + translate toggle -> argv.
+-- =====================================================================
+do
+  local on = H.buildCaptureFlags({ "--mode", "email", "--rewrite" }, true)
+  eq(#on, 4, "buildCaptureFlags appends one translate flag")
+  eq(on[1], "--mode", "mode flags preserved [1]")
+  eq(on[2], "email", "mode flags preserved [2]")
+  eq(on[3], "--rewrite", "mode flags preserved [3]")
+  eq(on[4], "--translate", "translate=true -> --translate")
+
+  local off = H.buildCaptureFlags({ "--mode", "raw" }, false)
+  eq(off[#off], "--no-translate", "translate=false -> --no-translate")
+
+  local empty = H.buildCaptureFlags(nil, true)
+  eq(#empty, 1, "nil mode flags -> just the translate flag")
+  eq(empty[1], "--translate", "nil mode flags + translate -> --translate")
+end
+
+-- =====================================================================
+-- normalizeBackend (hs-app-window): "" / "default" / nil all mean config
+-- default (nil); any other value is the backend name verbatim.
+-- =====================================================================
+do
+  eq(H.normalizeBackend(nil), nil, "normalizeBackend(nil) -> nil")
+  eq(H.normalizeBackend(""), nil, "normalizeBackend('') -> nil")
+  eq(H.normalizeBackend("default"), nil, "normalizeBackend('default') -> nil")
+  eq(H.normalizeBackend("auto"), "auto", "normalizeBackend('auto') -> 'auto'")
+  eq(H.normalizeBackend("claude"), "claude", "normalizeBackend('claude') -> 'claude'")
+  eq(H.normalizeBackend("codex"), "codex", "normalizeBackend('codex') -> 'codex'")
+end
+
+-- =====================================================================
+-- normalizeTranslate (hs-app-window): any value coerced to a strict boolean.
+-- =====================================================================
+do
+  eq(H.normalizeTranslate(true), true, "normalizeTranslate(true) -> true")
+  eq(H.normalizeTranslate(false), false, "normalizeTranslate(false) -> false")
+  eq(H.normalizeTranslate(nil), false, "normalizeTranslate(nil) -> false")
+  eq(H.normalizeTranslate("yes"), true, "normalizeTranslate(truthy) -> true")
+  eq(H.normalizeTranslate(0), true, "normalizeTranslate(0) -> true (0 is truthy in lua)")
+end
+
+-- =====================================================================
+-- buildMenu (hs-hotkey-menubar): the menubar model for (state, backend).
+-- Header reflects state+backend; the backend submenu radio is checked for the
+-- active backend; injected `actions` are wired to the right items.
+-- =====================================================================
+do
+  local menu = H.buildMenu("idle", nil, {})
+  check(type(menu) == "table", "buildMenu returns a table")
+  check(menu[1].title:match("^Alfred — idle"), "header shows state")
+  eq(menu[1].disabled, true, "header is a disabled label")
+  eq(menu[2].title, "-", "second item is a separator")
+
+  -- Backend submenu: with backend=nil, "Default (config)" is checked, others not.
+  local function backendSub(m)
+    for _, it in ipairs(m) do if it.title == "Backend" then return it.menu end end
+  end
+  local sub = backendSub(menu)
+  check(sub ~= nil and #sub == 4, "backend submenu has 4 entries")
+  eq(sub[1].title, "Default (config)", "backend[1] is Default")
+  eq(sub[1].checked, true, "backend nil -> Default checked")
+  eq(sub[2].checked, false, "backend nil -> auto unchecked")
+
+  -- With backend='claude', the header shows it and the claude radio is checked.
+  local m2 = H.buildMenu("recording", "claude", {})
+  check(m2[1].title:match("claude"), "header shows active backend")
+  local sub2 = backendSub(m2)
+  eq(sub2[1].checked, false, "backend claude -> Default unchecked")
+  eq(sub2[3].checked, true, "backend claude -> claude radio checked")
+
+  -- Injected actions are wired: clicking a backend radio invokes setBackend(value).
+  local picked = "UNSET"
+  local m3 = H.buildMenu("idle", nil, { setBackend = function(v) picked = v end })
+  local sub3 = backendSub(m3)
+  sub3[2].fn()                     -- "auto" radio
+  eq(picked, "auto", "auto radio calls setBackend('auto')")
+  sub3[1].fn()                     -- "Default (config)" radio
+  eq(picked, nil, "Default radio calls setBackend(nil)")
+
+  -- Top-level action items are wired to the injected callbacks.
+  local hits = {}
+  local m4 = H.buildMenu("idle", nil, {
+    toggleDictate = function() hits.dictate = true end,
+    cancel        = function() hits.cancel = true end,
+  })
+  local function itemByTitle(m, t)
+    for _, it in ipairs(m) do if it.title == t then return it end end
+  end
+  itemByTitle(m4, "Dictate (toggle)").fn()
+  itemByTitle(m4, "Cancel recording").fn()
+  eq(hits.dictate, true, "Dictate item wired to toggleDictate")
+  eq(hits.cancel, true, "Cancel item wired to cancel")
+end
+
 -- ---- summary -------------------------------------------------------------
 local total = passed + failed
 print(string.format("test_helpers.lua: %d/%d assertions passed", passed, total))

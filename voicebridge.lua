@@ -54,6 +54,9 @@ _G.voicebridge = VB
 
 local ICONS = { idle = "🎙️", recording = "🔴", processing = "⏳" }
 
+-- Pure: the menubar glyph for a state, falling back to the idle mic.
+local function iconForState(s) return ICONS[s] or ICONS.idle end
+
 -- Output formats offered by the mode picker. The catalog (Email/Commit/your
 -- custom [intent] modes…) is loaded from the engine via `voicebridge.py modes`
 -- (see refreshModes); these two pseudo-entries always bracket it.
@@ -157,7 +160,7 @@ end
 
 function setState(s)
   VB.state = s
-  if VB.menubar then VB.menubar:setTitle(ICONS[s] or "🎙️") end
+  if VB.menubar then VB.menubar:setTitle(iconForState(s)) end
   pushWindowState()
 end
 
@@ -249,7 +252,11 @@ end
 
 -- sox prints a progress line to stderr (with `-S`); the VU meter is the
 -- bracketed segment containing a '|'. We turn its "fill" into a 0..1 level.
-function soxStream(_, _, stdErr)
+-- Pure: scan a stderr blob and return the PEAK level (0..1) across its meter
+-- segments, or nil when no meter is present. fill = non-space, non-'|' chars
+-- over the total width of the bracketed segment.
+local function soxLevel(stdErr)
+  local peak = nil
   for seg in (stdErr or ""):gmatch("[^\r\n]+") do
     local meter = seg:match("%[([^%[%]]-|[^%[%]]-)%]")
     if meter then
@@ -258,9 +265,18 @@ function soxStream(_, _, stdErr)
         total = total + 1
         if ch ~= " " and ch ~= "|" then fill = fill + 1 end
       end
-      if total > 0 then VB.level = math.max(VB.level or 0, fill / total) end
+      if total > 0 then
+        local lvl = fill / total
+        if not peak or lvl > peak then peak = lvl end
+      end
     end
   end
+  return peak
+end
+
+function soxStream(_, _, stdErr)
+  local lvl = soxLevel(stdErr)
+  if lvl then VB.level = math.max(VB.level or 0, lvl) end
   return true
 end
 
@@ -570,12 +586,19 @@ end
 local RESULT_ACTIONS = { copy = "onCopy", paste = "onPaste",
                          email = "onEmail", discard = "onDiscard" }
 
+-- Pure: route a button id to its injected handler, passing the result text.
+-- Returns the handler name that fired, or nil (unknown id / no handler) — the
+-- whole click→action contract of the panel, free of hs.* for testing.
+local function resultDispatch(id, handlers, text)
+  local name = RESULT_ACTIONS[id]
+  local fn = name and (handlers or {})[name]
+  if fn then fn(text); return name end
+  return nil
+end
+
 function resultClick(_, msg, id)
   if msg ~= "mouseUp" then return end
-  local text = VB.resultText or ""
-  local handlers = VB.resultHandlers or {}
-  local fn = handlers[RESULT_ACTIONS[id]]
-  if fn then fn(text) end
+  resultDispatch(id, VB.resultHandlers or {}, VB.resultText or "")
 end
 
 -- showResult(text, llmFailed, handlers): the panel is now a pure view. The
@@ -658,11 +681,29 @@ function readHistory(limit)
   return items
 end
 
-function windowCaptureFlags()
+-- Pure window helpers (no hs.*), extracted so the window's logic is testable:
+--   buildCaptureFlags  — mode flags + the translate toggle -> engine argv flags
+--   normalizeBackend   — a "setBackend" value; "" / "default" / nil all mean
+--                        "use config" (nil); otherwise the backend name
+--   normalizeTranslate — a "setTranslate" value coerced to a strict boolean
+local function buildCaptureFlags(modeFlags, translate)
   local f = {}
-  for _, a in ipairs(VB.winModeFlags or {}) do f[#f + 1] = a end
-  f[#f + 1] = VB.winTranslate and "--translate" or "--no-translate"
+  for _, a in ipairs(modeFlags or {}) do f[#f + 1] = a end
+  f[#f + 1] = translate and "--translate" or "--no-translate"
   return f
+end
+
+local function normalizeBackend(value)
+  if value and value ~= "" and value ~= "default" then return value end
+  return nil
+end
+
+local function normalizeTranslate(value)
+  return value and true or false
+end
+
+function windowCaptureFlags()
+  return buildCaptureFlags(VB.winModeFlags, VB.winTranslate)
 end
 
 function windowToggleRecord()
@@ -706,9 +747,9 @@ function onWebMessage(message)
   elseif a == "setMode" then
     local m = MODES[d.index]; VB.winModeFlags = (m and m.flags) or {}
   elseif a == "setBackend" then
-    VB.backend = (d.value and d.value ~= "" and d.value ~= "default") and d.value or nil
+    VB.backend = normalizeBackend(d.value)
   elseif a == "setTranslate" then
-    VB.winTranslate = d.value and true or false
+    VB.winTranslate = normalizeTranslate(d.value)
   elseif a == "processText" then
     if type(d.text) == "string" and #d.text > 0 then
       VB.captureFlags = windowCaptureFlags()
@@ -972,6 +1013,42 @@ function setModel(backend, model)
   t:start()
 end
 
+-- ---- Menu bar model ------------------------------------------------------
+-- Pure: build the menubar menu structure for (state, backend). `actions`
+-- supplies the click callbacks by name so this stays free of hs.* — the live
+-- menu passes the real handlers; tests pass stubs and assert titles, the
+-- separators, and the backend radio's checked state.
+local function buildMenu(state, backend, actions)
+  actions = actions or {}
+  local function backendItem(label, value)
+    return { title = label, checked = (backend == value),
+             fn = function() if actions.setBackend then actions.setBackend(value) end end }
+  end
+  return {
+    { title = "Alfred — " .. tostring(state) ..
+              (backend and ("  ·  " .. backend) or ""), disabled = true },
+    { title = "-" },
+    { title = "Open Alfred window", fn = actions.openWindow },
+    { title = "Dictate (toggle)", fn = actions.toggleDictate },
+    { title = "Dictate as…", fn = actions.dictateWithMode },
+    { title = "Type…", fn = actions.typePrompt },
+    { title = "Backend", menu = {
+        { title = "Default (config)", checked = (backend == nil),
+          fn = function() if actions.setBackend then actions.setBackend(nil) end end },
+        backendItem("auto", "auto"),
+        backendItem("claude", "claude"),
+        backendItem("codex", "codex"),
+      } },
+    { title = "Cancel recording", fn = actions.cancel },
+    { title = "-" },
+    { title = "Open recordings folder", fn = actions.openRecordings },
+    { title = "Edit config…", fn = actions.editConfig },
+    { title = "Reload intent modes", fn = actions.reloadModes },
+    { title = "Restart engine (warm)", fn = actions.restartDaemon },
+    { title = "Reload Hammerspoon", fn = actions.reloadHammerspoon },
+  }
+end
+
 -- ---- Test-export seam ----------------------------------------------------
 -- Under VB_LUA_TEST this returns the PURE helpers (string/table/math only at
 -- call time) and bails out BEFORE any Hammerspoon runtime init runs, so plain
@@ -979,7 +1056,15 @@ end
 if os.getenv("VB_LUA_TEST") then
   return { parseStatus = parseStatus, buildModes = buildModes,
            modesForJS = modesForJS, fmtTime = fmtTime,
-           RESULT_ACTIONS = RESULT_ACTIONS }
+           RESULT_ACTIONS = RESULT_ACTIONS, resultDispatch = resultDispatch,
+           -- hs-recording pure logic
+           iconForState = iconForState, soxLevel = soxLevel,
+           -- hs-app-window pure logic
+           buildCaptureFlags = buildCaptureFlags,
+           normalizeBackend = normalizeBackend,
+           normalizeTranslate = normalizeTranslate,
+           -- hs-hotkey-menubar pure logic
+           buildMenu = buildMenu }
 end
 
 -- ---- Menu bar ------------------------------------------------------------
@@ -987,40 +1072,27 @@ end
 VB.menubar = hs.menubar.new()
 VB.menubar:setTitle(ICONS.idle)
 VB.menubar:setMenu(function()
-  return {
-    { title = "Alfred — " .. VB.state ..
-              (VB.backend and ("  ·  " .. VB.backend) or ""), disabled = true },
-    { title = "-" },
-    { title = "Open Alfred window", fn = function() openWindow() end },
-    { title = "Dictate (toggle)", fn = toggleDictate },
-    { title = "Dictate as…", fn = dictateWithMode },
-    { title = "Type…", fn = typePrompt },
-    { title = "Backend", menu = {
-        { title = "Default (config)", checked = (VB.backend == nil),
-          fn = function() VB.backend = nil end },
-        { title = "auto",   checked = (VB.backend == "auto"),
-          fn = function() VB.backend = "auto" end },
-        { title = "claude", checked = (VB.backend == "claude"),
-          fn = function() VB.backend = "claude" end },
-        { title = "codex",  checked = (VB.backend == "codex"),
-          fn = function() VB.backend = "codex" end },
-      } },
-    { title = "Cancel recording", fn = function()
-        if VB.recTask and VB.recTask:isRunning() then VB.recTask:terminate() end
-        destroyHUD(); setState("idle"); hs.alert.show("Cancelled", 0.8)
-      end },
-    { title = "-" },
-    { title = "Open recordings folder", fn = function()
-        hs.execute("open ~/Documents/VoiceBridge 2>/dev/null || open ~/Documents")
-      end },
-    { title = "Edit config…", fn = function()
-        hs.execute("open -t '" .. resolveConfigPath() .. "' 2>/dev/null || open -t '"
-          .. DIR .. "/config.example.toml'")
-      end },
-    { title = "Reload intent modes", fn = function() refreshModes() end },
-    { title = "Restart engine (warm)", fn = function() restartDaemon() end },
-    { title = "Reload Hammerspoon", fn = function() hs.reload() end },
-  }
+  return buildMenu(VB.state, VB.backend, {
+    openWindow = function() openWindow() end,
+    toggleDictate = toggleDictate,
+    dictateWithMode = dictateWithMode,
+    typePrompt = typePrompt,
+    setBackend = function(v) VB.backend = v end,
+    cancel = function()
+      if VB.recTask and VB.recTask:isRunning() then VB.recTask:terminate() end
+      destroyHUD(); setState("idle"); hs.alert.show("Cancelled", 0.8)
+    end,
+    openRecordings = function()
+      hs.execute("open ~/Documents/VoiceBridge 2>/dev/null || open ~/Documents")
+    end,
+    editConfig = function()
+      hs.execute("open -t '" .. resolveConfigPath() .. "' 2>/dev/null || open -t '"
+        .. DIR .. "/config.example.toml'")
+    end,
+    reloadModes = function() refreshModes() end,
+    restartDaemon = function() restartDaemon() end,
+    reloadHammerspoon = function() hs.reload() end,
+  })
 end)
 
 -- ---- Bind hotkeys --------------------------------------------------------
