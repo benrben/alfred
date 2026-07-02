@@ -194,6 +194,28 @@ class ServeRoundTrip(unittest.TestCase):
             c.close()
             self.assertEqual(r.status, 403, f"{method} with foreign Host must 403")
 
+    def test_concurrent_posts_run_in_parallel_not_serialized(self):
+        # A slow command must NOT block a concurrent one (regression for the
+        # daemon-wide POST lock that serialized every request behind each
+        # capture's transcribe+LLM). We patch `doctor` to sleep, fire two
+        # concurrently, and assert the wall time is ~one sleep, not two.
+        import concurrent.futures as cf
+        orig = vb.cmd_doctor
+        vb.cmd_doctor = lambda args: (time.sleep(0.6) or 0)
+        try:
+            t0 = time.time()
+            with cf.ThreadPoolExecutor(max_workers=2) as ex:
+                f1 = ex.submit(self._post, "/", {"argv": ["doctor"]})
+                f2 = ex.submit(self._post, "/", {"argv": ["doctor"]})
+                f1.result()
+                f2.result()
+            elapsed = time.time() - t0
+        finally:
+            vb.cmd_doctor = orig
+        # Serialized would be ~1.2s; parallel ~0.6s. Allow headroom.
+        self.assertLess(elapsed, 1.0,
+                        f"concurrent POSTs serialized ({elapsed:.2f}s ~ 2x sleep)")
+
     def test_concurrent_posts_do_not_cross_output(self):
         # Two overlapping POSTs must each get their OWN captured stdout — the
         # daemon serializes the redirect so they can't cross (regression for the

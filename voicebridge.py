@@ -421,8 +421,11 @@ def transcribe(audio_path: str, cfg: dict, *, language: str | None,
 # chunk) and transcribe it in chunks cut at silences, so when the user stops only
 # the last short chunk remains — turning a multi-second post-stop wait into ~1-2s.
 
-_STREAM_TARGET = 12 * 16000      # aim to cut a chunk around 12s …
-_STREAM_MAX = 18 * 16000         # … but no later than 18s (Whisper likes <=30s)
+# Chunk geometry: cut around 8s, no later than 11s. Lower than the old 12/18s so
+# a MEDIUM dictation (11-18s) actually gets pre-transcribed WHILE recording
+# instead of entirely at stop; 8s is still ample context for Whisper accuracy.
+_STREAM_TARGET = 8 * 16000       # aim to cut a chunk around 8s …
+_STREAM_MAX = 11 * 16000         # … but no later than 11s (Whisper likes <=30s)
 _STREAM_FRAME = 800              # 50ms silence-search frame
 
 
@@ -576,6 +579,7 @@ class StreamSession:
 
     def _run(self) -> None:
         idle = 0
+        last_avail = -1
         while not self.stop:
             worked = False
             try:
@@ -583,17 +587,23 @@ class StreamSession:
                     worked = self._chunk_once()
             except Exception as e:                       # noqa: BLE001
                 sys.stderr.write(f"stream chunk error: {e}\n")
-            if worked:
+            # Abandon ONLY when the WAV stops growing (a cancelled/crashed
+            # recording that never calls stream-finish) — NOT merely when a chunk
+            # didn't fire, which also happens during a long pause while the file
+            # is still being written. Otherwise the thread would poll a dead file
+            # forever in the long-lived daemon.
+            avail = _pcm_sample_count(self.path, self.data_off)
+            if worked or avail != last_avail:
                 idle = 0
             else:
                 idle += 1
-                # Self-terminate an abandoned session: a cancelled/crashed
-                # recording never calls stream-finish, so without this the thread
-                # would poll a dead file forever in the long-lived daemon.
                 if idle >= _STREAM_ABANDON_POLLS:
-                    sys.stderr.write("stream: no new audio; abandoning session\n")
+                    sys.stderr.write("stream: file not growing; abandoning session\n")
                     self.stop = True
-            time.sleep(0.2 if worked else 1.0)
+            last_avail = avail
+            # Poll fast enough that finish()'s join isn't stuck waiting out a long
+            # idle sleep (was 1.0s -> up to ~1s of dead stop→result latency).
+            time.sleep(0.2 if worked else 0.4)
 
     def start(self) -> None:
         self._write()
@@ -1356,22 +1366,25 @@ class MacosSink(Sink):
     def paste(self) -> bool:
         # osascript exits nonzero when the controlling process lacks the
         # Accessibility grant, so returncode tells us whether the paste landed.
+        # timeout so a modal permission prompt / stuck System Events can't freeze
+        # the stop→result path (a TimeoutExpired reads as paste_failed).
         try:
             proc = subprocess.run(
                 [_macos_tool("osascript"), "-e",
                  'tell application "System Events" to keystroke "v" using '
                  'command down'],
-                capture_output=True, text=True, check=False,
+                capture_output=True, text=True, check=False, timeout=5,
             )
-        except OSError:
+        except (OSError, subprocess.TimeoutExpired):
             return False
         return proc.returncode == 0
 
     def snapshot(self) -> str | None:
         try:
             proc = subprocess.run([_macos_tool("pbpaste")], capture_output=True,
-                                  text=True, encoding="utf-8", check=False)
-        except OSError:
+                                  text=True, encoding="utf-8", check=False,
+                                  timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
             return None
         return proc.stdout if proc.returncode == 0 else None
 
@@ -2160,12 +2173,45 @@ def add_common(p):
                    help="print result to stdout instead of clipboard/file")
 
 
-# Serializes POST command execution so the process-global stdout/stderr redirect
-# in one request can't corrupt another's captured output (ThreadingHTTPServer
-# runs a thread per request). Requests already contend for one Whisper model, so
-# serialization costs little; GET (health/contract) is NOT locked, so liveness
-# checks still answer during a long capture.
-_POST_LOCK = threading.Lock()
+class _ThreadStream:
+    """A sys.stdout/sys.stderr stand-in that routes each thread's writes to a
+    per-thread buffer when one is installed, else to the real underlying stream.
+
+    This lets the threaded daemon capture EACH request's output concurrently with
+    no global lock — where a naive per-request contextlib.redirect_stdout mutates
+    the process-global sys.stdout and races other requests. Installed once at
+    serve start; do_POST pushes/pops a buffer around each dispatch. A capture used
+    to serialize every POST (so a multi-second transcribe+LLM blocked all other
+    commands); this removes that serialization while keeping outputs uncrossed."""
+
+    def __init__(self, real):
+        self._real = real
+        self._tl = threading.local()
+
+    def redirect(self, buf) -> None:
+        self._tl.buf = buf
+
+    def restore(self) -> None:
+        self._tl.buf = None
+
+    def _target(self):
+        buf = getattr(self._tl, "buf", None)
+        return buf if buf is not None else self._real
+
+    def write(self, s):
+        return self._target().write(s)
+
+    def flush(self):
+        try:
+            self._target().flush()
+        except Exception:                            # noqa: BLE001
+            pass
+
+    def isatty(self):
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
 
 
 def _daemon_identity() -> dict:
@@ -2256,6 +2302,14 @@ def cmd_serve(args) -> int:
             sys.stderr.write(f"alfred: claude pre-warm skipped ({e}).\n")
     threading.Thread(target=_prewarm, daemon=True).start()
 
+    # Route each request thread's stdout/stderr to its own buffer (no global
+    # lock, no serialization) so concurrent commands — and a long capture's
+    # transcribe+LLM — never block or cross each other. do_POST installs these as
+    # sys.stdout/stderr on first use (idempotent — same object, so concurrent
+    # installs don't race) and never restores per-request; they stay put.
+    _real_out, _real_err = sys.stdout, sys.stderr
+    out_proxy, err_proxy = _ThreadStream(_real_out), _ThreadStream(_real_err)
+
     class Handler(BaseHTTPRequestHandler):
         def _json(self, status, obj):
             data = json.dumps(obj).encode()
@@ -2292,27 +2346,35 @@ def cmd_serve(args) -> int:
                 req = {}
             out_buf, err_buf = io.StringIO(), io.StringIO()
             code = 1
-            # Serialize the redirect+dispatch so concurrent requests can't cross
-            # each other's captured stdout/stderr (the global-redirect race).
-            with _POST_LOCK:
-                with contextlib.redirect_stdout(out_buf), \
-                        contextlib.redirect_stderr(err_buf):
-                    try:
-                        ns = parser.parse_args(req.get("argv") or [])
-                        code = ns.func(ns)
-                    except SystemExit as e:
-                        code = int(e.code or 0)
-                    except RuntimeError as e:
-                        sys.stderr.write(f"error: {e}\n")
-                        print_status("error", "runtime")
-                        code = 1
-                    except Exception as e:             # noqa: BLE001
-                        sys.stderr.write(f"alfred: request failed: {e}\n")
-                        print_status("error", "runtime")
-                        code = 1
+            # Ensure the per-thread router is the active stream (a test harness
+            # or anything else may have swapped sys.stdout since); idempotent.
+            if sys.stdout is not out_proxy:
+                sys.stdout = out_proxy
+            if sys.stderr is not err_proxy:
+                sys.stderr = err_proxy
+            # Per-thread capture (no lock): this request's prints go to its own
+            # buffers; other requests run fully in parallel.
+            out_proxy.redirect(out_buf)
+            err_proxy.redirect(err_buf)
+            try:
+                ns = parser.parse_args(req.get("argv") or [])
+                code = ns.func(ns)
+            except SystemExit as e:
+                code = int(e.code or 0)
+            except RuntimeError as e:
+                sys.stderr.write(f"error: {e}\n")
+                print_status("error", "runtime")
+                code = 1
+            except Exception as e:                     # noqa: BLE001
+                sys.stderr.write(f"alfred: request failed: {e}\n")
+                print_status("error", "runtime")
+                code = 1
+            finally:
+                out_proxy.restore()
+                err_proxy.restore()
             err_text = err_buf.getvalue()
             if err_text:                               # keep it in the daemon log too
-                sys.stderr.write(err_text)
+                _real_err.write(err_text)
             self._json(200, {"code": code, "out": out_buf.getvalue(),
                              "err": err_text})
 
