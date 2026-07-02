@@ -137,7 +137,8 @@ class MainDispatch(unittest.TestCase):
         def boom(args):
             raise RuntimeError("kaboom")
         vb.cmd_doctor = boom
-        import contextlib, io
+        import contextlib
+        import io
         try:
             with contextlib.redirect_stdout(io.StringIO()), \
                  contextlib.redirect_stderr(io.StringIO()):
