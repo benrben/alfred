@@ -114,14 +114,17 @@ export default function Dictate(props: { launchContext?: { stop?: boolean } }) {
         // a menu-bar stop doesn't silently fall back to the config default.
         if (existing.format) setFormatId(existing.format.id);
         setPhase("recording");
-        // Populate the format list BEFORE a menu-bar-triggered stop so
-        // currentFormat() resolves the chosen format's flags, not empty ones.
-        setFormats(buildFormats(await modesPromise));
+        // Act NOW — don't wait on the modes round-trip. currentFormat() falls
+        // back to the persisted RecState.format, so a menu-bar-triggered stop
+        // still uses the right flags; the format list only feeds the UI picker.
         if (props.launchContext?.stop) void stopAndTranscribe();
+        setFormats(buildFormats(await modesPromise));
       } else {
         if (existing) clearRecState();
-        setFormats(buildFormats(await modesPromise));
+        // Mic on immediately; load the picker list in parallel (startRecording's
+        // stream-start uses currentFormat(), which handles an empty list).
         startRecording();
+        setFormats(buildFormats(await modesPromise));
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
