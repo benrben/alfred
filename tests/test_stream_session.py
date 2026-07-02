@@ -60,12 +60,13 @@ class StreamSessionLifecycle(unittest.TestCase):
         self.calls = []
 
         def fake_transcribe_samples(audio, cfg, *, language, whisper_translate,
-                                    initial_prompt=""):
+                                    initial_prompt="", decode_opts=None):
             self.calls.append({
                 "n": int(getattr(audio, "size", len(audio))),
                 "language": language,
                 "whisper_translate": whisper_translate,
                 "initial_prompt": initial_prompt,
+                "decode_opts": decode_opts,
             })
             return f"c{len(self.calls)}", "he"
 
@@ -82,6 +83,9 @@ class StreamSessionLifecycle(unittest.TestCase):
         vb._STREAM_TARGET = self.TARGET
         vb._STREAM_MAX = self.MAX
         vb._STREAM_FRAME = self.FRAME
+        # These sessions are created directly (not via cmd_stream_start); reset
+        # the active-session guard so _write() isn't skipped by a prior test.
+        vb._ACTIVE_STREAM = None
 
     def tearDown(self):
         for k, v in self._orig.items():
@@ -105,15 +109,35 @@ class StreamSessionLifecycle(unittest.TestCase):
         self.assertEqual(sess.text, "spaced   tail")  # ends stripped, inner kept
 
     # ---- _transcribe windowing -------------------------------------------
-    def test_transcribe_appends_advances_and_passes_initial_prompt(self):
+    def test_transcribe_appends_advances_no_rolling_prompt(self):
         sess = self._session(self.MAX * 2)
         sess.parts = ["earlier"]
         sess._transcribe(self.MAX)              # bounded window [0, MAX)
         self.assertEqual(sess.parts[-1], "c1")  # stub token appended
         self.assertGreater(sess.cursor, 0)      # cursor advanced past the cut
-        # initial_prompt is the tail of the accumulated text so far.
-        self.assertEqual(self.calls[0]["initial_prompt"], "earlier")
+        # The rolling accumulated-text prompt was REMOVED (it amplified
+        # hallucinated repeats); no per-chunk initial_prompt is passed.
+        self.assertEqual(self.calls[0]["initial_prompt"], "")
+        # Streaming disables cross-window conditioning to stop repeat bleed.
+        self.assertEqual(self.calls[0]["decode_opts"],
+                         {"condition_on_previous_text": False})
         self.assertFalse(self.calls[0]["whisper_translate"])
+
+    def test_silent_chunk_is_skipped_not_transcribed(self):
+        # A pure-silence window must NOT be sent to the model (Whisper
+        # hallucinates phantom text on silence); the cursor still advances.
+        import numpy as np
+        sess = self._session(self.MAX * 2)
+        # Force the read to return silence regardless of the on-disk ramp.
+        orig = vb._read_pcm_f32
+        vb._read_pcm_f32 = lambda *a, **k: np.zeros(self.MAX, dtype=np.float32)
+        try:
+            sess._transcribe(self.MAX)
+        finally:
+            vb._read_pcm_f32 = orig
+        self.assertEqual(self.calls, [])        # model never called
+        self.assertEqual(sess.parts, [])        # nothing appended
+        self.assertGreater(sess.cursor, 0)      # silence consumed, not re-read
 
     def test_transcribe_noop_when_window_below_a_frame(self):
         sess = self._session(self.MAX)

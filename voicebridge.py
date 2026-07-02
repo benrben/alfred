@@ -348,8 +348,13 @@ def _load_audio_16k(path: str):
 
 def transcribe_samples(audio, cfg: dict, *, language: str | None,
                        whisper_translate: bool,
-                       initial_prompt: str = "") -> tuple[str, str | None]:
-    """Transcribe a mono float32 16 kHz numpy array. Return (text, lang)."""
+                       initial_prompt: str = "",
+                       decode_opts: dict | None = None) -> tuple[str, str | None]:
+    """Transcribe a mono float32 16 kHz numpy array. Return (text, lang).
+
+    decode_opts passes extra Whisper decode options (e.g. the streaming path
+    disables condition_on_previous_text so a hallucinated repeat in one window
+    can't seed the next)."""
     try:
         import mlx_whisper
     except ModuleNotFoundError as e:
@@ -372,9 +377,35 @@ def transcribe_samples(audio, cfg: dict, *, language: str | None,
     ip = initial_prompt or cfg["stt"].get("initial_prompt")
     if ip:
         kwargs["initial_prompt"] = ip
+    if decode_opts:
+        kwargs.update(decode_opts)
 
     result = mlx_whisper.transcribe(audio, **kwargs)
     return (result.get("text") or "").strip(), result.get("language")
+
+
+# RMS below which a streamed chunk is treated as silence and NOT transcribed.
+# Whisper emits confident phantom text on silence ("Thank you.", "leaf leaf
+# leaf…"), and the streamer's rolling context turned that into a runaway loop.
+# Well below speech level (~0.02+) but above a real mic's noise floor, so it
+# drops pure pauses without clipping quiet speech.
+_STREAM_SILENCE_RMS = 0.0025
+# Streaming decode options: don't condition on previously-decoded text, so a
+# hallucinated repeat in one window can't bleed into the next.
+_STREAM_DECODE_OPTS = {"condition_on_previous_text": False}
+
+
+def _rms(buf) -> float:
+    """Root-mean-square level of a float32 buffer. Defensive: returns a
+    non-silent value for a non-array (a stub) so it's never dropped as silence."""
+    try:
+        import numpy as np
+        arr = np.asarray(buf, dtype=np.float32)
+        if arr.size == 0:
+            return 0.0
+        return float(np.sqrt(np.mean(arr * arr)))
+    except Exception:                                # noqa: BLE001
+        return 1.0
 
 
 def transcribe(audio_path: str, cfg: dict, *, language: str | None,
@@ -513,9 +544,20 @@ class StreamSession:
         cut = len(buf) if end is None else _silence_cut(
             buf, _STREAM_TARGET, _STREAM_MAX)
         chunk = buf[:cut]
+        # Silence gate: a pure-pause chunk makes Whisper hallucinate ("Thank
+        # you.", "leaf leaf leaf…"); skip it (consume the samples, transcribe
+        # nothing) so it can't seed a runaway repeat.
+        if _rms(chunk) < _STREAM_SILENCE_RMS:
+            self.cursor += cut
+            self._write()
+            return
+        # No rolling initial_prompt: feeding the accumulated text back in
+        # amplified any hallucinated repeat into a loop. Chunks are cut at
+        # pauses, so cross-chunk context is marginal; the config vocab prompt
+        # (names/jargon) still applies via transcribe_samples.
         txt, lang = transcribe_samples(
             chunk, self.cfg, language=self.language, whisper_translate=self.wt,
-            initial_prompt=self.text[-200:])
+            decode_opts=_STREAM_DECODE_OPTS)
         if txt:
             self.parts.append(txt)
         if lang:
