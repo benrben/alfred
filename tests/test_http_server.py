@@ -23,6 +23,7 @@ import threading
 import time
 import types
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -53,6 +54,13 @@ class ServeRoundTrip(unittest.TestCase):
         cls._saved_warm = vb._get_warm
         vb._get_warm = lambda cfg, env: None
 
+        # Redirect the daemon-info file to a temp dir so the test doesn't write
+        # (and leave stale) ~/.voicebridge/daemon.json in the real home dir.
+        import tempfile
+        cls._info = Path(tempfile.mkdtemp()) / "daemon.json"
+        cls._saved_info = vb._daemon_info_path
+        vb._daemon_info_path = lambda: cls._info
+
         cls.port = _free_port()
         cls.args = type("NS", (), {"port": cls.port, "config": NO_CFG})()
         cls.thread = threading.Thread(target=vb.cmd_serve, args=(cls.args,),
@@ -68,6 +76,7 @@ class ServeRoundTrip(unittest.TestCase):
         if cls._saved_mod is not None:
             sys.modules["mlx_whisper"] = cls._saved_mod
         vb._get_warm = cls._saved_warm
+        vb._daemon_info_path = cls._saved_info
         vb._DAEMON_MODE = False        # cmd_serve flips this global; reset it.
 
     @staticmethod
