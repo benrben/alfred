@@ -242,13 +242,19 @@ export function resolvedPath(
 /** The recorder command args (int16 mono 16 kHz WAV) from the contract's
  * `audio.sox_args`, with the output WAV appended. Falls back to the literal
  * invariant when an older engine omits `audio`. */
+// Hard cap on a single recording (seconds). A dictation is never this long; the
+// cap makes sox self-stop so a recording that's dismissed and never stopped
+// (the "Esc keeps recording" flow) can't run forever and fill the disk / hold
+// the mic. Applied as a sox `trim 0 <secs>` output effect.
+export const MAX_RECORD_SECS = 300;
+
 export function recorderArgs(wav: string): string[] {
   const a = currentContract().audio?.sox_args;
   const base =
     Array.isArray(a) && a.length
       ? a
       : ["-d", "-S", "-r", "16000", "-c", "1", "-b", "16"];
-  return [...base, wav];
+  return [...base, wav, "trim", "0", String(MAX_RECORD_SECS)];
 }
 
 /**

@@ -334,7 +334,20 @@ def _load_audio_16k(path: str):
             "pip install soundfile numpy"
         ) from e
 
-    audio, sr = sf.read(path, dtype="float32", always_2d=False)
+    try:
+        audio, sr = sf.read(path, dtype="float32", always_2d=False)
+    except Exception as e:                   # noqa: BLE001
+        # A recorder killed mid-write (SIGKILL / crash) leaves an un-finalized
+        # WAV whose header still declares a placeholder data length, which
+        # soundfile refuses to open ("Error opening … : System error"). Fall back
+        # to reading the raw int16 PCM after the data chunk using the REAL file
+        # size (the streaming reader's approach) — recordings are always the
+        # contract's 16 kHz mono int16, so this recovers the audio.
+        audio = _read_pcm_f32(path, _wav_data_offset(path), 0, None)
+        sr = 16000
+        if audio.size == 0:
+            raise RuntimeError(
+                f"could not read audio (empty or unreadable WAV): {e}") from e
     if getattr(audio, "ndim", 1) > 1:        # stereo -> mono
         audio = audio.mean(axis=1)
     if sr != 16000:                          # light linear resample

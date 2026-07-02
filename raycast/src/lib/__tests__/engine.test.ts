@@ -366,7 +366,7 @@ describe("resolvedPath", () => {
 });
 
 describe("recorderArgs", () => {
-  it("appends the wav to the fallback sox_args (cold contract)", async () => {
+  it("appends the wav + a recording-duration cap to the fallback sox_args", async () => {
     const { engine } = await freshEngine();
     expect(engine.recorderArgs("/tmp/x.wav")).toEqual([
       "-d",
@@ -378,6 +378,9 @@ describe("recorderArgs", () => {
       "-b",
       "16",
       "/tmp/x.wav",
+      "trim",
+      "0",
+      String(engine.MAX_RECORD_SECS),
     ]);
   });
 });

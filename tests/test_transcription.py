@@ -169,6 +169,26 @@ class LoadAudio16k(unittest.TestCase):
         self.assertEqual(audio.ndim, 1)
         self.assertEqual(len(audio), 1600)
 
+    def test_recovers_via_raw_pcm_when_soundfile_cannot_open(self):
+        # A recorder killed mid-write leaves an un-finalized WAV soundfile refuses
+        # to open ("System error"). _load_audio_16k must fall back to raw int16
+        # PCM and still recover the audio instead of crashing the capture.
+        import numpy as np
+        import soundfile as sf
+        path = self._write_wav(
+            np.linspace(-0.3, 0.3, 16000).astype("float32"), 16000)
+        orig = sf.read
+
+        def boom(*a, **k):
+            raise RuntimeError("Error opening: System error")
+        sf.read = boom
+        try:
+            audio = vb._load_audio_16k(path)
+        finally:
+            sf.read = orig
+        self.assertEqual(audio.dtype, np.float32)
+        self.assertGreater(len(audio), 0)        # recovered via the raw fallback
+
 
 if __name__ == "__main__":
     unittest.main()

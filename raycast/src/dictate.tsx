@@ -145,6 +145,17 @@ export default function Dictate(props: { launchContext?: { stop?: boolean } }) {
       setPhase("error");
       return;
     }
+    // Defensively stop any recorder still tracked in RecState before starting a
+    // new one, so a confused state can never orphan a `sox` that keeps holding
+    // the mic and growing a file. SIGINT lets it finalize its WAV.
+    const stale = readRecState();
+    if (stale && isAlive(stale.pid)) {
+      try {
+        process.kill(stale.pid, "SIGINT");
+      } catch {
+        // already gone
+      }
+    }
     const stamp = Date.now();
     const wav = join(tmpdir(), `alfred_rec_${stamp}.wav`);
     const meter = join(tmpdir(), `alfred_rec_${stamp}.meter`);
