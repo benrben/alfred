@@ -167,6 +167,24 @@ class ServeRoundTrip(unittest.TestCase):
         c.close()
         self.assertEqual(r.status, 403)
 
+    def test_non_loopback_host_is_refused(self):
+        # A DNS-rebinding request arrives with the attacker's hostname in Host ->
+        # 403 (both GET and POST). We hand-craft the Host header.
+        for method, body in (("GET", None), ("POST", json.dumps({"argv": ["doctor"]}))):
+            c = self._conn()
+            c.putrequest(method, "/", skip_host=True, skip_accept_encoding=True)
+            c.putheader("Host", "attacker.example.com")
+            if body is not None:
+                c.putheader("Content-Type", "text/plain")
+                c.putheader("Content-Length", str(len(body)))
+            c.endheaders()
+            if body is not None:
+                c.send(body.encode())
+            r = c.getresponse()
+            r.read()
+            c.close()
+            self.assertEqual(r.status, 403, f"{method} with foreign Host must 403")
+
     def test_concurrent_posts_do_not_cross_output(self):
         # Two overlapping POSTs must each get their OWN captured stdout — the
         # daemon serializes the redirect so they can't cross (regression for the
