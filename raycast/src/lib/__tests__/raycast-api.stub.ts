@@ -30,3 +30,14 @@ export const Clipboard = {
 export async function getSelectedText(): Promise<string> {
   return "";
 }
+
+// launchCommand / LaunchType are referenced by engine.ts (refreshMenuBar). The
+// tests never trigger a launch; these are inert stand-ins so the module imports.
+export const LaunchType = {
+  UserInitiated: "userInitiated",
+  Background: "background",
+} as const;
+
+export async function launchCommand(): Promise<void> {
+  return undefined;
+}

@@ -169,7 +169,7 @@ describe("buildFormats / flagsForFormat", () => {
 });
 
 describe("resolveDelivery", () => {
-  it("copied -> reads the clipboard text", async () => {
+  it("copied -> reads the clipboard text (no VB_RESULT)", async () => {
     const { engine, stub } = await freshEngine();
     stub.setClipboardText("hello world");
     const res = { code: 0, out: "VB_STATUS\tcopied", err: "" };
@@ -177,7 +177,53 @@ describe("resolveDelivery", () => {
       kind: "copied",
       text: "hello world",
       llmFailed: false,
+      pasteFailed: false,
     });
+  });
+
+  it("copied -> prefers the VB_RESULT line over the clipboard", async () => {
+    const { engine, stub } = await freshEngine();
+    stub.setClipboardText("stale clipboard");
+    const out = `VB_RESULT\t${JSON.stringify("the delivered text")}\nVB_STATUS\tcopied`;
+    const res = { code: 0, out, err: "" };
+    expect(await engine.resolveDelivery(res)).toEqual({
+      kind: "copied",
+      text: "the delivered text",
+      llmFailed: false,
+      pasteFailed: false,
+    });
+  });
+
+  it("saved -> prefers VB_RESULT text without reading the file", async () => {
+    const { engine } = await freshEngine();
+    const out = `VB_RESULT\t${JSON.stringify("body from result line")}\nVB_STATUS\tsaved\t/nope/missing.md`;
+    const d = await engine.resolveDelivery({ code: 0, out, err: "" });
+    expect(d.kind).toBe("saved");
+    expect(d.path).toBe("/nope/missing.md");
+    expect(d.text).toBe("body from result line");
+  });
+
+  it("flags paste_failed from the status line", async () => {
+    const { engine, stub } = await freshEngine();
+    stub.setClipboardText("x");
+    const res = { code: 0, out: "VB_STATUS\tcopied\tpaste_failed", err: "" };
+    const d = await engine.resolveDelivery(res);
+    expect(d.kind).toBe("copied");
+    expect(d.pasteFailed).toBe(true);
+    expect(d.llmFailed).toBe(false);
+  });
+
+  it("flags both paste_failed and llm_failed together", async () => {
+    const { engine, stub } = await freshEngine();
+    stub.setClipboardText("x");
+    const res = {
+      code: 0,
+      out: "VB_STATUS\tcopied\tpaste_failed\tllm_failed",
+      err: "",
+    };
+    const d = await engine.resolveDelivery(res);
+    expect(d.pasteFailed).toBe(true);
+    expect(d.llmFailed).toBe(true);
   });
 
   it("saved -> returns the path from the status line", async () => {
@@ -205,6 +251,7 @@ describe("resolveDelivery", () => {
     expect(await engine.resolveDelivery(res)).toEqual({
       kind: "error",
       llmFailed: false,
+      pasteFailed: false,
     });
   });
 
@@ -214,7 +261,124 @@ describe("resolveDelivery", () => {
     expect(await engine.resolveDelivery(res)).toEqual({
       kind: "unknown",
       llmFailed: false,
+      pasteFailed: false,
     });
+  });
+});
+
+describe("parseResult", () => {
+  it("decodes the JSON-encoded VB_RESULT line (newlines survive)", async () => {
+    const { engine } = await freshEngine();
+    const out = `noise\nVB_RESULT\t${JSON.stringify("line 1\nline 2")}\nVB_STATUS\tcopied`;
+    expect(engine.parseResult(out)).toBe("line 1\nline 2");
+  });
+
+  it("returns null when no VB_RESULT line is present (older engine)", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.parseResult("VB_STATUS\tcopied")).toBeNull();
+  });
+
+  it("returns null on a malformed (non-JSON) result payload", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.parseResult("VB_RESULT\tnot json")).toBeNull();
+  });
+});
+
+describe("daemonUrl", () => {
+  it("builds on the resolved port with a default '/' path", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.daemonUrl()).toBe("http://127.0.0.1:8763/");
+    expect(engine.daemonUrl("/contract")).toBe(
+      "http://127.0.0.1:8763/contract",
+    );
+  });
+
+  it("honours a daemonPort preference", async () => {
+    const { engine, stub } = await freshEngine();
+    stub.mockPrefs.daemonPort = "7001";
+    expect(engine.daemonUrl("/")).toBe("http://127.0.0.1:7001/");
+  });
+});
+
+describe("schema_version compatibility", () => {
+  it("the fallback contract matches the engine's current schema_version (1)", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.fallbackContract().schema_version).toBe(1);
+  });
+
+  it("no warning when versions match", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.schemaMismatchWarning(1, 1)).toBeNull();
+  });
+
+  it("warns (naming both versions) when the engine's version differs", async () => {
+    const { engine } = await freshEngine();
+    const w = engine.schemaMismatchWarning(1, 2);
+    expect(w).toContain("v2");
+    expect(w).toContain("v1");
+    expect(w).toMatch(/out of sync/i);
+  });
+
+  it("no warning when either version is missing", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.schemaMismatchWarning(0, 2)).toBeNull();
+    expect(engine.schemaMismatchWarning(1, 0)).toBeNull();
+  });
+
+  it("loadContract stores a warning when the fetched contract's version differs", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ ...CONTRACT_FIXTURE, schema_version: 2 }), {
+        status: 200,
+      }),
+    );
+    const { engine } = await freshEngine();
+    expect(engine.contractSchemaWarning()).toBeNull(); // not computed yet
+    await engine.loadContract();
+    expect(engine.contractSchemaWarning()).toMatch(/out of sync/i);
+  });
+});
+
+describe("resolvedPath", () => {
+  it("prefers the contract's absolute `resolved` block (honours [history].dir)", async () => {
+    const { engine } = await freshEngine();
+    const withResolved = {
+      ...CONTRACT_FIXTURE,
+      resolved: {
+        progress: "/abs/progress.json",
+        stream: "/abs/stream.json",
+        history: "/abs/history/history.jsonl",
+      },
+    };
+    expect(engine.resolvedPath(withResolved, "history")).toBe(
+      "/abs/history/history.jsonl",
+    );
+    expect(engine.resolvedPath(withResolved, "progress")).toBe(
+      "/abs/progress.json",
+    );
+  });
+
+  it("falls back to the file templates when there is no `resolved` block", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.resolvedPath(CONTRACT_FIXTURE, "history")).toBe(
+      join(homedir(), "custom", "history", "history.jsonl"),
+    );
+  });
+});
+
+describe("recorderArgs", () => {
+  it("appends the wav to the fallback sox_args (cold contract)", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.recorderArgs("/tmp/x.wav")).toEqual([
+      "-d",
+      "-S",
+      "-r",
+      "16000",
+      "-c",
+      "1",
+      "-b",
+      "16",
+      "/tmp/x.wav",
+    ]);
   });
 });
 

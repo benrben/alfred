@@ -11,7 +11,13 @@
  * clipboard or saves it to a file and prints a machine-readable `VB_STATUS` line;
  * resolveDelivery() reads that back, mirroring the .lua's onResult().
  */
-import { Clipboard, getPreferenceValues, getSelectedText } from "@raycast/api";
+import {
+  Clipboard,
+  getPreferenceValues,
+  getSelectedText,
+  LaunchType,
+  launchCommand,
+} from "@raycast/api";
 import { spawn } from "node:child_process";
 import {
   existsSync,
@@ -134,6 +140,9 @@ export interface ContractStatusLine {
   sep: string;
   kinds?: Record<string, string[]>;
   llm_failed_suffix?: string;
+  paste_failed_suffix?: string;
+  /** Sentinel for the optional machine-readable result line (VB_RESULT). */
+  result_sentinel?: string;
 }
 
 export interface ContractFile {
@@ -141,16 +150,36 @@ export interface ContractFile {
   schema?: Record<string, unknown>;
 }
 
+export interface ContractAudio {
+  rate: number;
+  channels: number;
+  bits: number;
+  format: string;
+  sox_args: string[];
+}
+
+/** Absolute, config-aware paths the engine resolves for us (honours
+ * [history].dir). Present on newer engines; absent on older ones. */
+export interface ContractResolved {
+  progress?: string;
+  stream?: string;
+  history?: string;
+  daemon_info?: string;
+  config?: string;
+}
+
 export interface Contract {
   schema_version: number;
   daemon: { host: string; port: number; url?: string; [k: string]: unknown };
   status_line: ContractStatusLine;
+  audio?: ContractAudio;
   files: {
     progress: ContractFile;
     stream: ContractFile;
     history: ContractFile;
     [k: string]: ContractFile;
   };
+  resolved?: ContractResolved;
   config_search?: string[];
 }
 
@@ -172,6 +201,15 @@ export function fallbackContract(): Contract {
         error: ["subtype"],
       },
       llm_failed_suffix: "llm_failed",
+      paste_failed_suffix: "paste_failed",
+      result_sentinel: "VB_RESULT",
+    },
+    audio: {
+      rate: 16000,
+      channels: 1,
+      bits: 16,
+      format: "wav",
+      sox_args: ["-d", "-S", "-r", "16000", "-c", "1", "-b", "16"],
     },
     files: {
       progress: { path: "~/.voicebridge/progress.json" },
@@ -187,6 +225,50 @@ export function contractPath(contract: Contract, key: string): string {
   const raw = contract.files?.[key]?.path;
   if (!raw) return expandHome(fallbackContract().files[key]?.path ?? "");
   return expandHome(raw);
+}
+
+/** Absolute path for a state file: prefer the engine's `resolved` block (which
+ * honours [history].dir) when present, else derive from the file templates.
+ * Backward compatible — older engines have no `resolved` block. */
+export function resolvedPath(
+  contract: Contract,
+  key: "progress" | "stream" | "history",
+): string {
+  const abs = contract.resolved?.[key];
+  if (abs) return expandHome(abs);
+  return contractPath(contract, key);
+}
+
+/** The recorder command args (int16 mono 16 kHz WAV) from the contract's
+ * `audio.sox_args`, with the output WAV appended. Falls back to the literal
+ * invariant when an older engine omits `audio`. */
+export function recorderArgs(wav: string): string[] {
+  const a = currentContract().audio?.sox_args;
+  const base =
+    Array.isArray(a) && a.length
+      ? a
+      : ["-d", "-S", "-r", "16000", "-c", "1", "-b", "16"];
+  return [...base, wav];
+}
+
+/**
+ * Warn when the engine's contract schema_version differs from the one this
+ * extension was built against — any difference is a backward-incompatible bump,
+ * so the two are out of sync and the extension should be rebuilt. Returns null
+ * when the versions match or either is missing.
+ */
+export function schemaMismatchWarning(
+  local: number,
+  engine: number,
+): string | null {
+  if (!local || !engine || local === engine) return null;
+  return `⚠️ Engine schema v${engine} but this extension expects v${local} — they're out of sync. Rebuild/update the Alfred Raycast extension.`;
+}
+
+// The mismatch warning computed once loadContract() has the real contract.
+let schemaWarning: string | null = null;
+export function contractSchemaWarning(): string | null {
+  return schemaWarning;
 }
 
 // Cached contract: undefined = not yet fetched; null = fetched and failed (so
@@ -211,22 +293,30 @@ export async function loadContract(): Promise<Contract> {
   if (cachedContract) return cachedContract;
   if (contractInFlight) return contractInFlight;
   contractInFlight = (async () => {
+    let contract: Contract | null = null;
     // 1) warm daemon, if up
     try {
-      const res = await fetch(`http://127.0.0.1:${daemonPort()}/contract`, {
+      const res = await fetch(daemonUrl("/contract"), {
         signal: AbortSignal.timeout(2000),
       });
-      if (res.ok) {
-        const c = parseContract(await res.text());
-        if (c) return (cachedContract = c);
-      }
+      if (res.ok) contract = parseContract(await res.text());
     } catch {
       // daemon down or no /contract route — try the one-shot CLI
     }
     // 2) one-shot CLI `contract`
-    const one = await runOneShot(["contract"]);
-    const c = one.code === 0 ? parseContract(one.out) : null;
-    return (cachedContract = c ?? fallbackContract());
+    if (!contract) {
+      const one = await runOneShot(["contract"]);
+      contract = one.code === 0 ? parseContract(one.out) : null;
+    }
+    cachedContract = contract ?? fallbackContract();
+    // Compare the engine's schema_version against the one we were built with,
+    // here (before the promise resolves) so EVERY awaiter observes it set. Equal
+    // — or the literal fallback — yields no warning.
+    schemaWarning = schemaMismatchWarning(
+      fallbackContract().schema_version,
+      cachedContract.schema_version,
+    );
+    return cachedContract;
   })();
   try {
     return await contractInFlight;
@@ -248,10 +338,16 @@ export function daemonPort(): string {
   return String(currentContract().daemon.port || 8763);
 }
 
+/** The single source of truth for the daemon's base URL (built on daemonPort()),
+ * so callEngine/pingDaemon/loadContract don't each re-derive "127.0.0.1:8763". */
+export function daemonUrl(path = "/"): string {
+  return `http://127.0.0.1:${daemonPort()}${path}`;
+}
+
 /** Quick health check of the warm daemon (GET /). */
 export async function pingDaemon(): Promise<boolean> {
   try {
-    const res = await fetch(`http://127.0.0.1:${daemonPort()}/`, {
+    const res = await fetch(daemonUrl("/"), {
       signal: AbortSignal.timeout(2000),
     });
     return res.ok;
@@ -266,19 +362,22 @@ export async function callEngine(argv: string[]): Promise<EngineResult> {
   // Never blocks the call and never throws (loadContract resolves to the
   // literal fallback on any error).
   if (cachedContract === undefined) void loadContract();
-  const prefs = getPrefs();
-  const port = (prefs.daemonPort || "8763").trim();
-  const url = `http://127.0.0.1:${port}/`;
   try {
-    const res = await fetch(url, {
+    const res = await fetch(daemonUrl("/"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ argv }),
       signal: AbortSignal.timeout(DAEMON_TIMEOUT_MS),
     });
     if (res.ok) {
-      const data = (await res.json()) as { code?: number; out?: string };
-      return { code: data.code ?? 0, out: data.out ?? "", err: "" };
+      const data = (await res.json()) as {
+        code?: number;
+        out?: string;
+        err?: string;
+      };
+      // The daemon now returns the request's captured stderr in `err`; older
+      // daemons omit it (`?? ""`), so every error toast stays informative.
+      return { code: data.code ?? 0, out: data.out ?? "", err: data.err ?? "" };
     }
   } catch {
     // daemon unavailable — fall through to a one-shot process
@@ -309,10 +408,9 @@ function runOneShot(argv: string[]): Promise<EngineResult> {
 
 /** Launch the warm engine daemon, detached, so it survives this command. */
 export function startDaemon(): void {
-  const prefs = getPrefs();
   const script = resolveScript();
   const py = resolvePython(script);
-  const port = (prefs.daemonPort || "8763").trim();
+  const port = daemonPort();
   try {
     const child = spawn(py, [script, "serve", "--port", port], {
       detached: true,
@@ -480,11 +578,33 @@ export function parseStatus(out: string): string[] | null {
   return null;
 }
 
+/** Parse the engine's machine-readable result line "VB_RESULT<sep><json text>",
+ * emitted just BEFORE the final VB_STATUS. Returns the decoded text, or null if
+ * absent (older engine / the --stdout path). Preferred over the clipboard. */
+export function parseResult(out: string): string | null {
+  const sl = currentContract().status_line;
+  const sentinel = sl?.result_sentinel || "VB_RESULT";
+  const sep = sl?.sep || "\t";
+  const prefix = sentinel + sep;
+  for (const line of out.split(/\r?\n/)) {
+    if (line.startsWith(prefix)) {
+      try {
+        const text = JSON.parse(line.slice(prefix.length));
+        return typeof text === "string" ? text : null;
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
 export interface DeliveredResult {
   kind: string; // copied | saved | empty | error | unknown
   text?: string;
   path?: string;
   llmFailed: boolean;
+  pasteFailed: boolean; // auto-paste was requested but the keystroke didn't land
 }
 
 export async function resolveDelivery(
@@ -492,26 +612,33 @@ export async function resolveDelivery(
 ): Promise<DeliveredResult> {
   const parts = parseStatus(res.out);
   const kind = parts?.[0] ?? (res.code === 0 ? "unknown" : "error");
-  const llmSuffix =
-    currentContract().status_line?.llm_failed_suffix || "llm_failed";
-  const llmFailed = !!parts && parts[parts.length - 1] === llmSuffix;
+  const sl = currentContract().status_line;
+  const llmSuffix = sl?.llm_failed_suffix || "llm_failed";
+  const pasteSuffix = sl?.paste_failed_suffix || "paste_failed";
+  // Both are trailing flags on the status line; scan for either (llm_failed is
+  // last when present, paste_failed may precede it).
+  const llmFailed = !!parts && parts.includes(llmSuffix);
+  const pasteFailed = !!parts && parts.includes(pasteSuffix);
+  // Prefer the exact delivered text the engine emitted (VB_RESULT) over racing
+  // the clipboard / reading the saved file.
+  const resultText = parseResult(res.out);
   if (kind === "copied") {
-    const text = (await Clipboard.readText()) ?? "";
-    return { kind, text, llmFailed };
+    const text = resultText ?? (await Clipboard.readText()) ?? "";
+    return { kind, text, llmFailed, pasteFailed };
   }
   if (kind === "saved") {
     const path = parts?.[1];
-    let text: string | undefined;
-    if (path && existsSync(path)) {
+    let text: string | undefined = resultText ?? undefined;
+    if (text === undefined && path && existsSync(path)) {
       try {
         text = readFileSync(path, "utf8");
       } catch {
         // ignore
       }
     }
-    return { kind, path, text, llmFailed };
+    return { kind, path, text, llmFailed, pasteFailed };
   }
-  return { kind, llmFailed };
+  return { kind, llmFailed, pasteFailed };
 }
 
 /** Last non-empty stderr line, for surfacing engine errors. */
@@ -528,7 +655,7 @@ export interface HistoryItem {
 }
 
 export function historyFile(): string {
-  return contractPath(currentContract(), "history");
+  return resolvedPath(currentContract(), "history");
 }
 
 export function readHistory(limit = 50): HistoryItem[] {
@@ -568,7 +695,7 @@ export interface Progress {
 }
 
 export function progressFile(): string {
-  return contractPath(currentContract(), "progress");
+  return resolvedPath(currentContract(), "progress");
 }
 
 /** The engine's current pipeline progress, or null if none/unreadable. */
@@ -597,7 +724,7 @@ export interface StreamState {
 }
 
 export function streamFile(): string {
-  return contractPath(currentContract(), "stream");
+  return resolvedPath(currentContract(), "stream");
 }
 
 /** The engine's live partial transcript during a streamed recording, or null. */
@@ -631,6 +758,10 @@ export interface RecState {
   wav: string;
   startedAt: number;
   meter?: string; // file sox's -S VU meter is written to (for the live level bar)
+  // The chosen output format at record time. Persisted so a reopen (Esc keeps
+  // recording) or a menu-bar-triggered stop still honours it instead of silently
+  // falling back to the config default with empty flags.
+  format?: FormatChoice;
 }
 
 function recStateFile(): string {
@@ -657,6 +788,15 @@ export function clearRecState(): void {
   } catch {
     // already gone
   }
+}
+
+/** Nudge the menu-bar command to re-read the recording state right away. Its own
+ * poll interval is up to a minute, so its 🔴 indicator would otherwise be stale
+ * after a start/stop/cancel. Best-effort — never throws. */
+export function refreshMenuBar(): void {
+  void launchCommand({ name: "menubar", type: LaunchType.Background }).catch(
+    () => {},
+  );
 }
 
 export function isAlive(pid: number): boolean {

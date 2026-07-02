@@ -1,21 +1,33 @@
 import { describe, expect, it } from "vitest";
-import type { FormatChoice, Progress, RecState, StreamState } from "../engine";
+import type {
+  FormatChoice,
+  Processing,
+  Progress,
+  RecState,
+  StreamState,
+} from "../engine";
 import {
+  buildEngineStatusMarkdown,
   buildRecordingMarkdown,
   buildTranscribingMarkdown,
   composeResultMarkdown,
+  deliveryFailure,
+  engineErrorExcerpt,
   fmtMs,
   fmtTime,
   formatHistoryTitle,
   formatHistoryWhen,
   initialBanner,
+  intentDetailMarkdown,
   levelBar,
   parseLevel,
+  processingStages,
   refinedBanner,
   reprocessBanner,
   resolveFormat,
   resolveLiveTranscript,
   transcribingStatus,
+  validateIntentKey,
 } from "../view-logic";
 
 // ---- dictate: time / level formatting -------------------------------------
@@ -293,6 +305,16 @@ describe("initialBanner", () => {
     );
   });
 
+  it("warns about a failed auto-paste (below the LLM warning)", () => {
+    expect(initialBanner({ pasteFailed: true, note: "Email" })).toMatch(
+      /Couldn't auto-paste/,
+    );
+    // LLM failure still wins over paste failure.
+    expect(initialBanner({ llmFailed: true, pasteFailed: true })).toBe(
+      "⚠️ LLM step failed — raw transcript below.",
+    );
+  });
+
   it("falls back to the note, then empty string", () => {
     expect(initialBanner({ note: "Email" })).toBe("Email");
     expect(initialBanner({})).toBe("");
@@ -379,5 +401,186 @@ describe("resolveFormat", () => {
 
   it("returns null when no formats are loaded", () => {
     expect(resolveFormat([], "email")).toBeNull();
+  });
+});
+
+// ---- delivery outcome: excerpt + failure classification -------------------
+
+describe("engineErrorExcerpt", () => {
+  it("prefers the last non-empty stderr line", () => {
+    expect(
+      engineErrorExcerpt({ out: "stuff", err: "warn\nreal error here\n" }),
+    ).toBe("real error here");
+  });
+
+  it("falls back to the stdout tail when stderr is empty", () => {
+    expect(
+      engineErrorExcerpt({ out: "line 1\nlast out line\n", err: "" }),
+    ).toBe("last out line");
+  });
+
+  it("returns a generic fallback when both are empty", () => {
+    expect(engineErrorExcerpt({ out: "", err: "" })).toBe("unknown error");
+  });
+});
+
+describe("deliveryFailure", () => {
+  const res = { out: "boom-out", err: "boom-err" };
+
+  it("returns null for delivered results (copied/saved)", () => {
+    expect(deliveryFailure("copied", res)).toBeNull();
+    expect(deliveryFailure("saved", res)).toBeNull();
+  });
+
+  it("labels an empty result", () => {
+    expect(deliveryFailure("empty", res)).toEqual({
+      title: "Nothing to process",
+    });
+  });
+
+  it("surfaces an excerpt for 'error'", () => {
+    expect(deliveryFailure("error", res)).toEqual({
+      title: "Engine error",
+      message: "boom-err",
+    });
+  });
+
+  it("treats the exit-0 'unknown' kind as a failure (not an empty screen)", () => {
+    expect(deliveryFailure("unknown", res)).toEqual({
+      title: "Engine error",
+      message: "boom-err",
+    });
+  });
+});
+
+// ---- manage-intents: key validation + detail markdown ---------------------
+
+describe("validateIntentKey", () => {
+  it("accepts a valid key on submit", () => {
+    expect(validateIntentKey("stand_up-1")).toBeUndefined();
+  });
+
+  it("requires a non-empty key on submit", () => {
+    expect(validateIntentKey("   ")).toBe("A key is required.");
+  });
+
+  it("rejects illegal characters on submit", () => {
+    expect(validateIntentKey("bad key!")).toBe(
+      "Use letters, numbers, - or _ only.",
+    );
+  });
+
+  it("allows an empty value while typing (allowEmpty)", () => {
+    expect(validateIntentKey("", { allowEmpty: true })).toBeUndefined();
+  });
+
+  it("rejects illegal characters while typing", () => {
+    expect(validateIntentKey("a b", { allowEmpty: true })).toBe(
+      "letters/numbers/-/_ only",
+    );
+  });
+});
+
+describe("intentDetailMarkdown", () => {
+  it("stars the default and italicises the subtitle", () => {
+    const md = intentDetailMarkdown({
+      title: "Email",
+      isDefault: true,
+      subtitle: "polish it",
+      body: "the prompt",
+    });
+    expect(md).toContain("# Email  ⭐️");
+    expect(md).toContain("_polish it_");
+    expect(md).toContain("the prompt");
+  });
+
+  it("omits the star when not the default", () => {
+    const md = intentDetailMarkdown({
+      title: "Email",
+      isDefault: false,
+      subtitle: "",
+      body: "b",
+    });
+    expect(md).toContain("# Email");
+    expect(md).not.toContain("⭐️");
+  });
+});
+
+// ---- engine-status: stages + markdown -------------------------------------
+
+describe("processingStages", () => {
+  it("returns [] for no processing block", () => {
+    expect(processingStages(null)).toEqual([]);
+    expect(processingStages(undefined)).toEqual([]);
+  });
+
+  it("lists only the enabled stages, with the translate route", () => {
+    const p: Processing = {
+      mode: "email",
+      rewrite: true,
+      translate: true,
+      optimize: false,
+      translate_via: "llm",
+    };
+    expect(processingStages(p)).toEqual(["rewrite", "translate (llm)"]);
+  });
+});
+
+describe("buildEngineStatusMarkdown", () => {
+  const aiFmt: FormatChoice = {
+    id: "email",
+    title: "Email",
+    subtitle: "",
+    ai: true,
+    flags: [],
+  };
+
+  it("renders daemon/format/stages/backend/paths and the doctor report", () => {
+    const md = buildEngineStatusMarkdown({
+      port: "8763",
+      up: true,
+      fmt: aiFmt,
+      stages: ["rewrite"],
+      backend: "claude",
+      claudeModel: "sonnet",
+      script: "/x/voicebridge.py",
+      python: "/x/.venv/bin/python3",
+      report: "all good",
+    });
+    expect(md).toContain("`127.0.0.1:8763`): 🟢 up");
+    expect(md).toContain("🪄 Email");
+    expect(md).toContain("**Stages on**: rewrite");
+    expect(md).toContain("**Backend**: claude · claude=sonnet");
+    expect(md).toContain("all good");
+    expect(md).not.toContain(">"); // no warning blockquote
+  });
+
+  it("shows a down daemon, no-stages placeholder, and dash format", () => {
+    const md = buildEngineStatusMarkdown({
+      port: "9",
+      up: false,
+      fmt: null,
+      stages: [],
+      script: "s",
+      python: "p",
+      report: "r",
+    });
+    expect(md).toContain("🔴 down");
+    expect(md).toContain("none (pure transcription)");
+    expect(md).toContain("**Default output**: —");
+  });
+
+  it("surfaces a schema-mismatch warning as a top blockquote", () => {
+    const md = buildEngineStatusMarkdown({
+      port: "8763",
+      up: true,
+      fmt: aiFmt,
+      stages: [],
+      script: "s",
+      python: "p",
+      report: "r",
+      warning: "⚠️ out of sync",
+    });
+    expect(md).toContain("> ⚠️ out of sync");
   });
 });

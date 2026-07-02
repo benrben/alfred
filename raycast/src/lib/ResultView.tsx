@@ -28,6 +28,8 @@ interface ResultViewProps {
   initialText: string;
   path?: string;
   llmFailed?: boolean;
+  /** Auto-paste was requested but the keystroke didn't land (surfaced as a note). */
+  pasteFailed?: boolean;
   formats: FormatChoice[];
   /** Shown as the top note when first opened (e.g. the format that produced it). */
   note?: string;
@@ -109,6 +111,7 @@ export function ResultView({
   initialText,
   path,
   llmFailed,
+  pasteFailed,
   formats,
   note,
   onDictateAgain,
@@ -116,7 +119,7 @@ export function ResultView({
   const { push } = useNavigation();
   const [text, setText] = useState(initialText);
   const [banner, setBanner] = useState<string>(
-    initialBanner({ llmFailed, path, note }),
+    initialBanner({ llmFailed, pasteFailed, path, note }),
   );
   const [busy, setBusy] = useState(false);
 

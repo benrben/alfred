@@ -23,6 +23,7 @@ import {
   setDefaultFormat,
   Settings,
 } from "./lib/engine";
+import { intentDetailMarkdown, validateIntentKey } from "./lib/view-logic";
 
 // See every format/intent, which one is the current default, edit the rewrite
 // prompt behind each, add new ones, and set the default — all saved to
@@ -100,15 +101,12 @@ export default function ManageIntents() {
               }
               detail={
                 <List.Item.Detail
-                  markdown={[
-                    `# ${f.title}${isDefault ? "  ⭐️" : ""}`,
-                    "",
-                    f.subtitle ? `_${f.subtitle}_` : "",
-                    "",
-                    "---",
-                    "",
+                  markdown={intentDetailMarkdown({
+                    title: f.title,
+                    isDefault,
+                    subtitle: f.subtitle,
                     body,
-                  ].join("\n")}
+                  })}
                 />
               }
               actions={
@@ -163,8 +161,9 @@ function IntentForm({ mode, onSaved }: { mode?: Mode; onSaved: () => void }) {
     prompt: string;
   }) {
     const k = (isNew ? (values.key ?? "") : mode!.key).trim();
-    if (!/^[A-Za-z0-9_-]+$/.test(k)) {
-      setKeyError("Use letters, numbers, - or _ only.");
+    const err = validateIntentKey(k);
+    if (err) {
+      setKeyError(err);
       return;
     }
     const argv = ["set-intent", k, "--prompt", values.prompt ?? ""];
@@ -211,11 +210,7 @@ function IntentForm({ mode, onSaved }: { mode?: Mode; onSaved: () => void }) {
           error={keyError}
           onChange={(v) => {
             setKey(v);
-            setKeyError(
-              /^[A-Za-z0-9_-]*$/.test(v)
-                ? undefined
-                : "letters/numbers/-/_ only",
-            );
+            setKeyError(validateIntentKey(v, { allowEmpty: true }));
           }}
         />
       ) : (

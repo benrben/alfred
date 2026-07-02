@@ -5,7 +5,13 @@
  * these and keep only their JSX glue. Behaviour is identical to the inline code
  * these were lifted from.
  */
-import type { FormatChoice, Progress, StreamState, RecState } from "./engine";
+import type {
+  FormatChoice,
+  Processing,
+  Progress,
+  StreamState,
+  RecState,
+} from "./engine";
 
 // ---- dictate.tsx: time / level formatting ---------------------------------
 
@@ -144,19 +150,20 @@ export function formatHistoryWhen(ts: string): string {
 
 /**
  * The banner shown when the result screen first opens: an LLM-failure warning,
- * else the saved-path note, else the caller's note (or empty).
+ * else a paste-failed warning, else the saved-path note, else the caller's note
+ * (or empty).
  */
 export function initialBanner(args: {
   llmFailed?: boolean;
+  pasteFailed?: boolean;
   path?: string;
   note?: string;
 }): string {
-  const { llmFailed, path, note } = args;
-  return llmFailed
-    ? "⚠️ LLM step failed — raw transcript below."
-    : path
-      ? `💾 Saved to \`${path}\``
-      : (note ?? "");
+  const { llmFailed, pasteFailed, path, note } = args;
+  if (llmFailed) return "⚠️ LLM step failed — raw transcript below.";
+  if (pasteFailed)
+    return "⚠️ Couldn't auto-paste — the result is copied (⏎ to paste).";
+  return path ? `💾 Saved to \`${path}\`` : (note ?? "");
 }
 
 /** Banner after a successful "Reprocess as…": format title, or raw note. */
@@ -202,4 +209,144 @@ export function resolveFormat(
   id: string,
 ): FormatChoice | null {
   return formats.find((f) => f.id === id) ?? formats[0] ?? null;
+}
+
+// ---- delivery outcome: failure classification -----------------------------
+
+function lastNonEmptyLine(s: string): string {
+  const lines = (s || "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  return lines.length ? lines[lines.length - 1] : "";
+}
+
+/**
+ * A short human excerpt for a failure toast: the last non-empty stderr line,
+ * else the tail of stdout, else a generic fallback. Lets a "silent" exit-0 run
+ * still say *something* useful.
+ */
+export function engineErrorExcerpt(res: { out: string; err: string }): string {
+  return (
+    lastNonEmptyLine(res.err) || lastNonEmptyLine(res.out) || "unknown error"
+  );
+}
+
+/**
+ * Classify a delivered result for a form/command: null means "success — show
+ * the result", otherwise the failure toast to display. Handles 'empty', 'error'
+ * AND the exit-0-with-no-VB_STATUS 'unknown' case, which otherwise slipped
+ * through to an empty result screen.
+ */
+export function deliveryFailure(
+  kind: string,
+  res: { out: string; err: string },
+): { title: string; message?: string } | null {
+  if (kind === "copied" || kind === "saved") return null;
+  if (kind === "empty") return { title: "Nothing to process" };
+  // "error" or "unknown" — surface an excerpt so it isn't a bare "Engine error".
+  return { title: "Engine error", message: engineErrorExcerpt(res) };
+}
+
+// ---- manage-intents: key validation + detail markdown ---------------------
+
+/**
+ * Validate an intent key (letters, numbers, - or _). With `allowEmpty` (live
+ * typing) an empty value is fine; on submit a key is required. Returns an error
+ * string, or undefined when valid. Single source for both call sites, which had
+ * drifted to two slightly different regexes/messages.
+ */
+export function validateIntentKey(
+  key: string,
+  opts: { allowEmpty?: boolean } = {},
+): string | undefined {
+  if (opts.allowEmpty) {
+    return /^[A-Za-z0-9_-]*$/.test(key)
+      ? undefined
+      : "letters/numbers/-/_ only";
+  }
+  const k = key.trim();
+  if (!k) return "A key is required.";
+  return /^[A-Za-z0-9_-]+$/.test(k)
+    ? undefined
+    : "Use letters, numbers, - or _ only.";
+}
+
+/** The List.Item.Detail markdown for one intent/format in Manage Intents. */
+export function intentDetailMarkdown(args: {
+  title: string;
+  isDefault: boolean;
+  subtitle: string;
+  body: string;
+}): string {
+  const { title, isDefault, subtitle, body } = args;
+  return [
+    `# ${title}${isDefault ? "  ⭐️" : ""}`,
+    "",
+    subtitle ? `_${subtitle}_` : "",
+    "",
+    "---",
+    "",
+    body,
+  ].join("\n");
+}
+
+// ---- engine-status: stages + status markdown ------------------------------
+
+/** The on/off pipeline stages of a [processing] block, as human labels. */
+export function processingStages(p?: Processing | null): string[] {
+  if (!p) return [];
+  return [
+    p.rewrite ? "rewrite" : null,
+    p.translate ? `translate (${p.translate_via})` : null,
+    p.optimize ? "optimize" : null,
+  ].filter((s): s is string => !!s);
+}
+
+/**
+ * The Engine Status Detail markdown. Pure given the resolved facts (daemon up?,
+ * default format, stages, backend, paths, doctor report) plus an optional
+ * schema-mismatch warning surfaced at the top.
+ */
+export function buildEngineStatusMarkdown(args: {
+  port: string;
+  up: boolean;
+  fmt?: FormatChoice | null;
+  stages: string[];
+  backend?: string;
+  claudeModel?: string;
+  script: string;
+  python: string;
+  report: string;
+  warning?: string | null;
+}): string {
+  const {
+    port,
+    up,
+    fmt,
+    stages,
+    backend,
+    claudeModel,
+    script,
+    python,
+    report,
+    warning,
+  } = args;
+  return [
+    "# Alfred engine",
+    "",
+    ...(warning ? [`> ${warning}`, ""] : []),
+    `- **Warm daemon** (\`127.0.0.1:${port}\`): ${up ? "🟢 up" : "🔴 down (starts on next use)"}`,
+    `- **Default output**: ${fmt ? (fmt.ai ? `🪄 ${fmt.title}` : "📝 Raw transcript (no AI)") : "—"}`,
+    `- **Stages on**: ${stages.length ? stages.join(", ") : "none (pure transcription)"}`,
+    `- **Backend**: ${backend ?? "—"}${claudeModel ? ` · claude=${claudeModel}` : ""}`,
+    `- **Engine**: \`${script}\``,
+    `- **Python**: \`${python}\``,
+    "",
+    "## `doctor`",
+    "",
+    "```",
+    report,
+    "```",
+  ].join("\n");
 }

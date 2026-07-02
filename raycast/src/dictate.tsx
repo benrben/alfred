@@ -25,14 +25,15 @@ import {
   FormatChoice,
   getPrefs,
   isAlive,
-  lastErrorLine,
   loadModes,
   pingDaemon,
   Progress,
   readProgress,
   readRecState,
   readStream,
+  recorderArgs,
   RecState,
+  refreshMenuBar,
   DeliveredResult,
   resolveDelivery,
   writeRecState,
@@ -41,6 +42,7 @@ import { ResultView } from "./lib/ResultView";
 import {
   buildRecordingMarkdown,
   buildTranscribingMarkdown,
+  engineErrorExcerpt,
   fmtMs,
   fmtTime,
   parseLevel,
@@ -104,20 +106,24 @@ export default function Dictate(props: { launchContext?: { stop?: boolean } }) {
   // default stays "Default (config)" so we never contradict the user's config.
   useEffect(() => {
     (async () => {
-      const modes = await loadModes();
-      setFormats(buildFormats(modes));
+      const modesPromise = loadModes();
+      const existing = readRecState();
+      if (existing && isAlive(existing.pid)) {
+        stateRef.current = existing;
+        // Restore the format chosen when this recording started, so a reopen or
+        // a menu-bar stop doesn't silently fall back to the config default.
+        if (existing.format) setFormatId(existing.format.id);
+        setPhase("recording");
+        // Populate the format list BEFORE a menu-bar-triggered stop so
+        // currentFormat() resolves the chosen format's flags, not empty ones.
+        setFormats(buildFormats(await modesPromise));
+        if (props.launchContext?.stop) void stopAndTranscribe();
+      } else {
+        if (existing) clearRecState();
+        setFormats(buildFormats(await modesPromise));
+        startRecording();
+      }
     })();
-
-    const existing = readRecState();
-    if (existing && isAlive(existing.pid)) {
-      stateRef.current = existing;
-      setPhase("recording");
-      // Opened from the menu bar's "Stop & Transcribe" — stop immediately.
-      if (props.launchContext?.stop) void stopAndTranscribe();
-    } else {
-      if (existing) clearRecState();
-      startRecording();
-    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -141,16 +147,26 @@ export default function Dictate(props: { launchContext?: { stop?: boolean } }) {
     const meter = join(tmpdir(), `alfred_rec_${stamp}.meter`);
     try {
       const fd = openSync(meter, "w");
-      const child = spawn(
-        sox,
-        ["-d", "-S", "-r", "16000", "-c", "1", "-b", "16", wav],
-        { detached: true, stdio: ["ignore", "ignore", fd], env: engineEnv() },
-      );
+      // Recorder args come from the engine's contract (audio.sox_args) so the
+      // int16/mono/16 kHz invariant lives in one place, not copied here.
+      const child = spawn(sox, recorderArgs(wav), {
+        detached: true,
+        stdio: ["ignore", "ignore", fd],
+        env: engineEnv(),
+      });
       child.unref();
       closeSync(fd);
       if (!child.pid) throw new Error("recorder did not start");
-      stateRef.current = { pid: child.pid, wav, meter, startedAt: stamp };
+      const fmt = currentFormat();
+      stateRef.current = {
+        pid: child.pid,
+        wav,
+        meter,
+        startedAt: stamp,
+        format: fmt,
+      };
       writeRecState(stateRef.current);
+      refreshMenuBar(); // show the 🔴 indicator immediately, not up to 60s later
       setPhase("recording");
       // Start transcribing the growing WAV in the warm daemon so most of it is
       // done by the time we stop. Best-effort: only via the daemon (a one-shot
@@ -158,11 +174,7 @@ export default function Dictate(props: { launchContext?: { stop?: boolean } }) {
       void (async () => {
         try {
           if (await pingDaemon())
-            await callEngine([
-              "stream-start",
-              wav,
-              ...flagsForFormat(currentFormat()),
-            ]);
+            await callEngine(["stream-start", wav, ...flagsForFormat(fmt)]);
         } catch {
           // streaming unavailable — batch on stop
         }
@@ -174,8 +186,25 @@ export default function Dictate(props: { launchContext?: { stop?: boolean } }) {
   }
 
   function currentFormat(): FormatChoice {
-    // Fall back to "use config" (no flags) — never to a stage-disabling raw.
-    return formats.find((f) => f.id === formatId) ?? configFormat();
+    // Prefer the loaded list; else the format persisted in the recording state
+    // (menu-bar cold-stop, before modes load); else "use config" (no flags) —
+    // never a stage-disabling raw.
+    return (
+      formats.find((f) => f.id === formatId) ??
+      stateRef.current?.format ??
+      configFormat()
+    );
+  }
+
+  // Choose an output format while recording: update state AND persist it into
+  // the recording state so a reopen / menu-bar stop still honours it.
+  function chooseFormat(f: FormatChoice) {
+    setFormatId(f.id);
+    const st = stateRef.current;
+    if (st) {
+      stateRef.current = { ...st, format: f };
+      writeRecState(stateRef.current);
+    }
   }
 
   async function stopAndTranscribe() {
@@ -191,6 +220,7 @@ export default function Dictate(props: { launchContext?: { stop?: boolean } }) {
     }
     await waitForExit(st.pid, 4000);
     clearRecState();
+    refreshMenuBar(); // clear the 🔴 indicator immediately
     if (fileSize(st.wav) <= 1024) {
       setError("Nothing recorded.");
       setPhase("error");
@@ -222,7 +252,9 @@ export default function Dictate(props: { launchContext?: { stop?: boolean } }) {
       setError("No speech detected.");
       setPhase("error");
     } else {
-      setError(lastErrorLine(res.err));
+      // "error" or an exit-0 "unknown" (no VB_STATUS): show stderr, else a
+      // stdout tail, so it's never a bare "unknown error".
+      setError(engineErrorExcerpt(res));
       setPhase("error");
     }
   }
@@ -236,6 +268,7 @@ export default function Dictate(props: { launchContext?: { stop?: boolean } }) {
         // already gone
       }
       clearRecState();
+      refreshMenuBar(); // clear the 🔴 indicator immediately
     }
     closeMainWindow();
     popToRoot();
@@ -254,6 +287,7 @@ export default function Dictate(props: { launchContext?: { stop?: boolean } }) {
         initialText={result.text ?? ""}
         path={result.path}
         llmFailed={result.llmFailed}
+        pasteFailed={result.pasteFailed}
         formats={formats}
         note={resultNote}
         onDictateAgain={dictateAgain}
@@ -326,7 +360,7 @@ export default function Dictate(props: { launchContext?: { stop?: boolean } }) {
                 key={f.id}
                 title={f.ai ? f.title : `${f.title} — no AI`}
                 icon={f.ai ? Icon.Wand : Icon.Text}
-                onAction={() => setFormatId(f.id)}
+                onAction={() => chooseFormat(f)}
               />
             ))}
           </ActionPanel.Submenu>

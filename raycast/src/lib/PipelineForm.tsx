@@ -17,12 +17,10 @@ import {
   flagsForFormat,
   FormatChoice,
   getInputText,
-  lastErrorLine,
   loadModes,
-  parseStatus,
   resolveDelivery,
 } from "./engine";
-import { resolveFormat } from "./view-logic";
+import { deliveryFailure, resolveFormat } from "./view-logic";
 import { ResultView } from "./ResultView";
 
 interface PipelineFormProps {
@@ -85,26 +83,16 @@ export function PipelineForm({ prefillSelection }: PipelineFormProps) {
       backend: values.backend,
     });
     const res = await callEngine(["text", body, ...flags]);
-    if (res.code !== 0 && !parseStatus(res.out)) {
-      toast.style = Toast.Style.Failure;
-      toast.title = "Engine error";
-      toast.message = lastErrorLine(res.err);
-      return;
-    }
     const delivered = await resolveDelivery(res);
     await toast.hide();
-    if (delivered.kind === "empty") {
+    // Classifies empty/error AND the exit-0-no-VB_STATUS "unknown" case, which
+    // used to slip through to an empty result screen.
+    const failure = deliveryFailure(delivered.kind, res);
+    if (failure) {
       await showToast({
         style: Toast.Style.Failure,
-        title: "Nothing to process",
-      });
-      return;
-    }
-    if (delivered.kind === "error") {
-      await showToast({
-        style: Toast.Style.Failure,
-        title: "Engine error",
-        message: lastErrorLine(res.err),
+        title: failure.title,
+        message: failure.message,
       });
       return;
     }
@@ -113,6 +101,7 @@ export function PipelineForm({ prefillSelection }: PipelineFormProps) {
         initialText={delivered.text ?? ""}
         path={delivered.path}
         llmFailed={delivered.llmFailed}
+        pasteFailed={delivered.pasteFailed}
         formats={formats}
         note={fmt.ai ? fmt.title : "Raw transcript"}
       />,

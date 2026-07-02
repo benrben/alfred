@@ -11,14 +11,17 @@ import { useEffect, useState } from "react";
 import {
   buildFormats,
   callEngine,
+  contractSchemaWarning,
   daemonPort,
   defaultFormatId,
+  loadContract,
   loadModes,
   loadSettings,
   pingDaemon,
   resolvePython,
   resolveScript,
 } from "./lib/engine";
+import { buildEngineStatusMarkdown, processingStages } from "./lib/view-logic";
 
 // Health + defaults at a glance: daemon up?, resolved paths, what the engine's
 // doctor says, and the current default format / stages / backend.
@@ -26,50 +29,42 @@ export default function Command() {
   const [markdown, setMarkdown] = useState("Checking the Alfred engine…");
   const [isLoading, setIsLoading] = useState(true);
 
-  useEffect(() => {
-    (async () => {
-      const port = daemonPort();
-      const [up, settings, modes, doctor] = await Promise.all([
-        pingDaemon(),
-        loadSettings(),
-        loadModes(),
-        callEngine(["doctor"]),
-      ]);
-      const script = resolveScript();
-      const python = resolvePython(script);
-      const p = settings?.processing;
-      const fmt = buildFormats(modes).find(
-        (f) => f.id === defaultFormatId(settings),
-      );
-      const stages = p
-        ? [
-            p.rewrite ? "rewrite" : null,
-            p.translate ? `translate (${p.translate_via})` : null,
-            p.optimize ? "optimize" : null,
-          ].filter(Boolean)
-        : [];
-      const report = (doctor.out || doctor.err || "(no output)").trim();
+  async function refresh() {
+    setIsLoading(true);
+    const port = daemonPort();
+    // loadContract() also computes the schema_version compatibility warning.
+    const [up, settings, modes, doctor] = await Promise.all([
+      pingDaemon(),
+      loadSettings(),
+      loadModes(),
+      callEngine(["doctor"]),
+      loadContract(),
+    ]);
+    const script = resolveScript();
+    const python = resolvePython(script);
+    const fmt = buildFormats(modes).find(
+      (f) => f.id === defaultFormatId(settings),
+    );
+    setMarkdown(
+      buildEngineStatusMarkdown({
+        port,
+        up,
+        fmt,
+        stages: processingStages(settings?.processing),
+        backend: settings?.backend,
+        claudeModel: settings?.claude_model,
+        script,
+        python,
+        report: (doctor.out || doctor.err || "(no output)").trim(),
+        warning: contractSchemaWarning(),
+      }),
+    );
+    setIsLoading(false);
+  }
 
-      setMarkdown(
-        [
-          "# Alfred engine",
-          "",
-          `- **Warm daemon** (\`127.0.0.1:${port}\`): ${up ? "🟢 up" : "🔴 down (starts on next use)"}`,
-          `- **Default output**: ${fmt ? (fmt.ai ? `🪄 ${fmt.title}` : "📝 Raw transcript (no AI)") : "—"}`,
-          `- **Stages on**: ${stages.length ? stages.join(", ") : "none (pure transcription)"}`,
-          `- **Backend**: ${settings?.backend ?? "—"}${settings?.claude_model ? ` · claude=${settings.claude_model}` : ""}`,
-          `- **Engine**: \`${script}\``,
-          `- **Python**: \`${python}\``,
-          "",
-          "## `doctor`",
-          "",
-          "```",
-          report,
-          "```",
-        ].join("\n"),
-      );
-      setIsLoading(false);
-    })();
+  useEffect(() => {
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
@@ -79,6 +74,12 @@ export default function Command() {
       markdown={markdown}
       actions={
         <ActionPanel>
+          <Action
+            title="Refresh"
+            icon={Icon.ArrowClockwise}
+            shortcut={{ modifiers: ["cmd"], key: "r" }}
+            onAction={refresh}
+          />
           <Action
             title="Manage Intents & Default"
             icon={Icon.Pencil}
