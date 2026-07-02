@@ -427,6 +427,10 @@ def transcribe(audio_path: str, cfg: dict, *, language: str | None,
 _STREAM_TARGET = 8 * 16000       # aim to cut a chunk around 8s …
 _STREAM_MAX = 11 * 16000         # … but no later than 11s (Whisper likes <=30s)
 _STREAM_FRAME = 800              # 50ms silence-search frame
+# Live preview: between committed chunks, re-transcribe the uncommitted tail this
+# often so the HUD transcript builds every ~1.5s instead of only every ~11s.
+_STREAM_PREVIEW_SECS = 1.5
+_STREAM_PREVIEW_MIN = int(1.2 * 16000)   # need ~1.2s of new audio to bother
 
 
 def _secure_dir(path: Path) -> None:
@@ -525,8 +529,10 @@ class StreamSession:
         self.language = language
         self.wt = whisper_translate
         self.data_off = _wav_data_offset(path)
-        self.cursor = 0                 # samples already transcribed
-        self.parts: list[str] = []
+        self.cursor = 0                 # samples already transcribed (committed)
+        self.parts: list[str] = []      # committed chunk texts
+        self.preview = ""               # live, uncommitted tail (revised each cycle)
+        self._last_preview_t = 0.0
         self.last_lang = None
         self.lock = threading.Lock()
         self.stop = False
@@ -536,7 +542,14 @@ class StreamSession:
 
     @property
     def text(self) -> str:
+        """Committed transcript (finalized chunks) — what finish() returns."""
         return " ".join(p for p in self.parts if p).strip()
+
+    @property
+    def display_text(self) -> str:
+        """Committed text + the live tail preview — what the HUD shows."""
+        p = (self.preview or "").strip()
+        return (self.text + " " + p).strip() if p else self.text
 
     def _transcribe(self, end: int | None) -> None:
         # end=None -> final tail: take all remaining (mlx-whisper windows it
@@ -566,6 +579,7 @@ class StreamSession:
         if lang:
             self.last_lang = lang
         self.cursor += cut
+        self.preview = ""               # committed audio absorbed the preview
         self._write()
 
     def _chunk_once(self) -> bool:
@@ -577,6 +591,31 @@ class StreamSession:
         self._transcribe(self.cursor + _STREAM_MAX)
         return True
 
+    def _preview(self) -> bool:
+        """Transcribe the UNCOMMITTED tail as a live preview (throttled, silence-
+        gated) so the transcript builds every ~1.5s instead of only when a full
+        ~11s chunk commits. The preview is transient — it's revised each cycle and
+        replaced by the committed chunk once the tail is long enough."""
+        now = time.monotonic()
+        if now - self._last_preview_t < _STREAM_PREVIEW_SECS:
+            return False
+        avail = _pcm_sample_count(self.path, self.data_off)
+        if avail - self.cursor < _STREAM_PREVIEW_MIN:
+            return False
+        end = min(avail, self.cursor + _STREAM_MAX)
+        buf = _read_pcm_f32(self.path, self.data_off, self.cursor, end)
+        if buf.size < _STREAM_FRAME or _rms(buf) < _STREAM_SILENCE_RMS:
+            return False
+        txt, lang = transcribe_samples(
+            buf, self.cfg, language=self.language, whisper_translate=self.wt,
+            decode_opts=_STREAM_DECODE_OPTS)
+        self.preview = txt or ""
+        if lang:
+            self.last_lang = lang
+        self._last_preview_t = time.monotonic()
+        self._write()
+        return True
+
     def _run(self) -> None:
         idle = 0
         last_avail = -1
@@ -585,6 +624,8 @@ class StreamSession:
             try:
                 with self.lock:
                     worked = self._chunk_once()
+                    if not worked:
+                        self._preview()      # refresh the live tail between chunks
             except Exception as e:                       # noqa: BLE001
                 sys.stderr.write(f"stream chunk error: {e}\n")
             # Abandon ONLY when the WAV stops growing (a cancelled/crashed
@@ -624,6 +665,7 @@ class StreamSession:
                 self._transcribe(self.cursor + _STREAM_MAX)
                 if self.cursor <= before:                # safety: no progress
                     break
+            self.preview = ""            # committed drain covers everything now
             self.done = True
             self._write()
         return self.text, self.last_lang
@@ -636,14 +678,14 @@ class StreamSession:
             return
         try:
             _atomic_write_json(_stream_path(), {
-                "transcript": self.text, "recording": not self.stop,
+                "transcript": self.display_text, "recording": not self.stop,
                 "done": self.done, "ts": _now_ms(), "path": self.path,
             })
         except Exception:                                # noqa: BLE001
             pass
 
 
-# How many ~1s idle polls before a session with no growing audio gives up.
+# How many idle polls (~0.4s each) with no WAV growth before a session gives up.
 _STREAM_ABANDON_POLLS = 120
 # Hard TTL: a session older than this is reaped on the next stream-start.
 _STREAM_TTL = 900

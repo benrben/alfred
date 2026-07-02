@@ -77,12 +77,16 @@ class StreamSessionLifecycle(unittest.TestCase):
             "_STREAM_TARGET": vb._STREAM_TARGET,
             "_STREAM_MAX": vb._STREAM_MAX,
             "_STREAM_FRAME": vb._STREAM_FRAME,
+            "_STREAM_PREVIEW_MIN": vb._STREAM_PREVIEW_MIN,
+            "_STREAM_PREVIEW_SECS": vb._STREAM_PREVIEW_SECS,
         }
         vb.transcribe_samples = fake_transcribe_samples
         vb._stream_path = lambda: self.stream_path
         vb._STREAM_TARGET = self.TARGET
         vb._STREAM_MAX = self.MAX
         vb._STREAM_FRAME = self.FRAME
+        vb._STREAM_PREVIEW_MIN = self.FRAME    # small: preview on any real tail
+        vb._STREAM_PREVIEW_SECS = 0.0          # no throttle in tests
         # These sessions are created directly (not via cmd_stream_start); reset
         # the active-session guard so _write() isn't skipped by a prior test.
         vb._ACTIVE_STREAM = None
@@ -175,6 +179,37 @@ class StreamSessionLifecycle(unittest.TestCase):
         # Whole recording consumed: nothing more than a frame left over.
         avail = vb._pcm_sample_count(sess.path, sess.data_off)
         self.assertLessEqual(avail - sess.cursor, self.FRAME)
+
+    # ---- live tail preview (builds the transcript between chunks) ----------
+    def test_preview_shows_uncommitted_tail_before_a_chunk_commits(self):
+        # Less than one full chunk of audio: nothing commits, but _preview()
+        # transcribes the tail so display_text / stream.json show a live partial.
+        sess = self._session(self.MAX - self.FRAME)
+        self.assertFalse(sess._chunk_once())          # no full chunk yet
+        self.assertTrue(sess._preview())              # preview ran
+        self.assertEqual(sess.parts, [])              # still uncommitted
+        self.assertTrue(sess.preview)                 # a live partial exists
+        self.assertEqual(sess.display_text, sess.preview)
+        live = json.loads(self.stream_path.read_text())
+        self.assertEqual(live["transcript"], sess.preview)   # HUD shows the preview
+        self.assertTrue(live["recording"])
+
+    def test_commit_absorbs_and_clears_the_preview(self):
+        sess = self._session(self.MAX * 2)
+        sess._preview()
+        self.assertTrue(sess.preview)
+        sess._transcribe(self.MAX)                    # commit a full chunk
+        self.assertTrue(sess.parts)                   # committed text present
+        self.assertEqual(sess.preview, "")            # preview cleared on commit
+        self.assertEqual(sess.display_text, sess.text)
+
+    def test_finish_clears_preview_and_returns_committed(self):
+        sess = self._session(self.MAX * 2)
+        sess._preview()
+        self.assertTrue(sess.preview)
+        text, _ = sess.finish()
+        self.assertEqual(sess.preview, "")            # not left dangling
+        self.assertEqual(text, sess.text)             # committed, not the preview
 
     # ---- stream.json sidecar ---------------------------------------------
     def test_write_sidecar_schema_and_done_flag(self):
