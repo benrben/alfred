@@ -48,18 +48,20 @@ class _Capture:
     def __enter__(self):
         self.delivered = []          # list of (text, do_paste)
         self.statuses = []           # list of status-line part tuples
+        self.results = []            # list of VB_RESULT payloads (print_result)
         self._saves = {}
 
         self._orig = {
             "deliver": vb.deliver,
             "history_append": vb.history_append,
             "print_status": vb.print_status,
+            "print_result": vb.print_result,
             "_progress_path": vb._progress_path,
         }
 
         def fake_deliver(text, cfg, do_paste, sink=None):
             self.delivered.append((text, do_paste))
-            return "copied", None
+            return "copied", None, None      # (kind, path, paste_ok)
 
         def fake_status(*parts):
             self.statuses.append(tuple(parts))
@@ -71,6 +73,7 @@ class _Capture:
         vb.deliver = fake_deliver
         vb.history_append = lambda *a, **k: None
         vb.print_status = fake_status
+        vb.print_result = lambda text: self.results.append(text)
         vb._progress_path = lambda: self._tmp
         return self
 
@@ -224,6 +227,81 @@ class CmdStreamFinishFallback(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(seen["path"], str(self.audio))
         self.assertEqual([t for t, _ in cap.delivered], ["STREAMED WORDS"])
+
+
+class CmdStreamLive(unittest.TestCase):
+    """The live streaming path (cmd_stream_start -> cmd_stream_finish) that every
+    Raycast daemon dictation takes: session registration + finish-time override
+    semantics (the format the user picks AFTER recording wins) + finish() failure."""
+
+    def setUp(self):
+        import tempfile
+        self.audio = str(Path(tempfile.mkdtemp()) / "rec.wav")
+        Path(self.audio).write_bytes(b"\x00")
+        self._orig_ss = vb.StreamSession
+        vb._STREAMS.clear()
+        vb._ACTIVE_STREAM = None
+
+    def tearDown(self):
+        vb.StreamSession = self._orig_ss
+        vb._STREAMS.clear()
+        vb._ACTIVE_STREAM = None
+
+    def _fake_session(self, text="streamed", lang="he", raise_on_finish=False):
+        audio = self.audio
+        outer = self
+
+        class FakeSession:
+            def __init__(self, path, cfg, language, whisper_translate):
+                self.path, self.cfg = path, cfg
+                self.language, self.wt = language, whisper_translate
+                self.stop = False
+                self.started = 0.0
+            def start(self):
+                outer.started = True
+            def finish(self):
+                if raise_on_finish:
+                    raise RuntimeError("stt exploded")
+                return text, lang
+        return FakeSession
+
+    def test_start_registers_session_and_second_start_stops_the_first(self):
+        vb.StreamSession = self._fake_session()
+        with _Capture():
+            rc = vb.cmd_stream_start(_ns(audio=self.audio))
+        self.assertEqual(rc, 0)
+        first = vb._STREAMS[self.audio]
+        self.assertIs(vb._ACTIVE_STREAM, first)
+        # A second start on the same path stops the first and replaces it.
+        with _Capture():
+            vb.cmd_stream_start(_ns(audio=self.audio))
+        self.assertTrue(first.stop)
+        self.assertIsNot(vb._STREAMS[self.audio], first)
+
+    def test_finish_time_format_override_reaches_process_text(self):
+        # Record with defaults, then finish with --mode email: the finish-time
+        # cfg (rewrite forced on by mode) must be what process_text sees.
+        vb.StreamSession = self._fake_session(text="hello there")
+        seen = {}
+        orig_pt = vb.process_text
+        vb.process_text = lambda text, c: seen.update(
+            rewrite=c["processing"]["rewrite"], mode=c["processing"]["mode"]) or text
+        try:
+            with _Capture():
+                vb.cmd_stream_start(_ns(audio=self.audio))
+                rc = vb.cmd_stream_finish(_ns(audio=self.audio, mode="email"))
+        finally:
+            vb.process_text = orig_pt
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen, {"rewrite": True, "mode": "email"})
+
+    def test_finish_failure_reports_stt_failed(self):
+        vb.StreamSession = self._fake_session(raise_on_finish=True)
+        with _Capture() as cap:
+            vb.cmd_stream_start(_ns(audio=self.audio))
+            rc = vb.cmd_stream_finish(_ns(audio=self.audio))
+        self.assertEqual(rc, 1)
+        self.assertEqual(cap.last_status, ("error", "stt_failed"))
 
 
 class CmdTextRouting(unittest.TestCase):

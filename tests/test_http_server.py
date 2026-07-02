@@ -105,28 +105,34 @@ class ServeRoundTrip(unittest.TestCase):
     def test_health_get_root(self):
         status, obj = self._get("/")
         self.assertEqual(status, 200)
-        self.assertEqual(obj, {"ok": True})
+        self.assertTrue(obj["ok"])
+        self.assertEqual(obj["app"], "alfred")       # identity, not just {"ok"}
+        self.assertEqual(obj["schema_version"], vb.CONTRACT["schema_version"])
+        self.assertIn("pid", obj)
 
     def test_contract_get(self):
         status, obj = self._get("/contract")
         self.assertEqual(status, 200)
         self.assertEqual(obj["schema_version"], 1)
-        self.assertEqual(obj, vb.CONTRACT)
+        # GET /contract now emits the resolved contract (static keys + resolved).
+        self.assertEqual({k: obj[k] for k in vb.CONTRACT}, vb.CONTRACT)
+        self.assertIn("resolved", obj)
 
-    def test_post_argv_runs_command_and_returns_code_out(self):
+    def test_post_argv_runs_command_and_returns_code_out_err(self):
         status, obj = self._post("/", {"argv": ["doctor"]})
         self.assertEqual(status, 200)
-        self.assertIn("code", obj)
-        self.assertIn("out", obj)
+        for k in ("code", "out", "err"):
+            self.assertIn(k, obj)
         self.assertEqual(obj["code"], 0)            # doctor returns 0
         self.assertIn("Alfred doctor", obj["out"])  # its stdout is captured
 
     def test_post_contract_command_round_trips_json(self):
-        # `contract` prints the CONTRACT to stdout; the daemon captures it.
+        # `contract` prints the resolved contract; the daemon captures it.
         status, obj = self._post("/", {"argv": ["contract"]})
         self.assertEqual(status, 200)
         self.assertEqual(obj["code"], 0)
-        self.assertEqual(json.loads(obj["out"]), vb.CONTRACT)
+        emitted = json.loads(obj["out"])
+        self.assertEqual({k: emitted[k] for k in vb.CONTRACT}, vb.CONTRACT)
 
     def test_post_bad_argv_does_not_crash_server(self):
         # An unknown subcommand triggers argparse SystemExit, caught -> nonzero.
@@ -136,7 +142,48 @@ class ServeRoundTrip(unittest.TestCase):
         self.assertNotEqual(obj["code"], 0)
         # Server is still alive afterwards.
         status2, health = self._get("/")
-        self.assertEqual(health, {"ok": True})
+        self.assertTrue(health["ok"])
+
+    def test_bad_json_body_does_not_crash_server(self):
+        # A non-JSON body -> req={} -> argparse SystemExit(2); server stays up.
+        c = self._conn()
+        c.request("POST", "/", body="}{ not json",
+                  headers={"Content-Type": "text/plain"})
+        r = c.getresponse()
+        obj = json.loads(r.read().decode())
+        c.close()
+        self.assertEqual(r.status, 200)
+        self.assertNotEqual(obj["code"], 0)
+        self.assertTrue(self._get("/")[1]["ok"])
+
+    def test_cross_origin_post_is_refused(self):
+        # A browser cross-site POST carries an Origin header -> 403 (CSRF guard).
+        c = self._conn()
+        c.request("POST", "/", body=json.dumps({"argv": ["doctor"]}),
+                  headers={"Content-Type": "text/plain",
+                           "Origin": "https://evil.example"})
+        r = c.getresponse()
+        r.read()
+        c.close()
+        self.assertEqual(r.status, 403)
+
+    def test_concurrent_posts_do_not_cross_output(self):
+        # Two overlapping POSTs must each get their OWN captured stdout — the
+        # daemon serializes the redirect so they can't cross (regression for the
+        # ThreadingHTTPServer global-stdout race).
+        import concurrent.futures as cf
+        with cf.ThreadPoolExecutor(max_workers=4) as ex:
+            futs = [ex.submit(self._post, "/", {"argv": ["contract"]})
+                    for _ in range(6)]
+            results = [f.result() for f in futs]
+        for status, obj in results:
+            self.assertEqual(status, 200)
+            self.assertEqual(obj["code"], 0)
+            emitted = json.loads(obj["out"])         # each parses on its own
+            self.assertEqual(emitted["schema_version"],
+                             vb.CONTRACT["schema_version"])
+        # A follow-up request still captures correctly (stdout not left wedged).
+        self.assertIn("Alfred doctor", self._post("/", {"argv": ["doctor"]})[1]["out"])
 
 
 if __name__ == "__main__":

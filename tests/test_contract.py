@@ -37,7 +37,7 @@ class ContractShape(unittest.TestCase):
     def test_top_level_keys(self):
         c = vb.CONTRACT
         self.assertEqual(c["schema_version"], 1)
-        for key in ("daemon", "status_line", "files", "config_search"):
+        for key in ("daemon", "status_line", "files", "config_search", "audio"):
             self.assertIn(key, c)
 
     def test_daemon_shape(self):
@@ -48,9 +48,20 @@ class ContractShape(unittest.TestCase):
         self.assertEqual(d["request"],
                          {"method": "POST", "path": "/",
                           "body": {"argv": ["<str>"]}})
-        self.assertEqual(d["response"], {"code": "int", "out": "str"})
+        # response now carries err (captured stderr) additively.
+        self.assertEqual(d["response"],
+                         {"code": "int", "out": "str", "err": "str"})
         self.assertEqual(d["health"], {"method": "GET", "path": "/"})
+        self.assertEqual(d["identity"]["app"], "alfred")
         self.assertEqual(d["contract"], {"method": "GET", "path": "/contract"})
+
+    def test_audio_shape(self):
+        a = vb.CONTRACT["audio"]
+        self.assertEqual(a["rate"], 16000)
+        self.assertEqual(a["channels"], 1)
+        self.assertEqual(a["bits"], 16)
+        self.assertEqual(a["format"], "wav")
+        self.assertIn("-r", a["sox_args"])
 
     def test_status_line_shape(self):
         s = vb.CONTRACT["status_line"]
@@ -64,6 +75,8 @@ class ContractShape(unittest.TestCase):
                          ["audio_not_found", "stt_failed", "llm_failed",
                           "runtime"])
         self.assertEqual(s["llm_failed_suffix"], "llm_failed")
+        self.assertEqual(s["paste_failed_suffix"], "paste_failed")
+        self.assertEqual(s["result_sentinel"], "VB_RESULT")
 
     def test_files_shape(self):
         f = vb.CONTRACT["files"]
@@ -75,7 +88,7 @@ class ContractShape(unittest.TestCase):
                           "delivering", "done", "error", "empty"])
         self.assertEqual(f["stream"]["path"], "~/.voicebridge/stream.json")
         self.assertEqual(set(f["stream"]["schema"]),
-                         {"transcript", "recording", "done", "ts"})
+                         {"transcript", "recording", "done", "ts", "path"})
         self.assertEqual(f["history"]["path"],
                          "~/.voicebridge/history/history.jsonl")
         self.assertEqual(f["history"]["format"], "jsonl")
@@ -88,16 +101,23 @@ class ContractShape(unittest.TestCase):
                          ["~/.config/voicebridge/config.toml",
                           "<engine_dir>/config.toml"])
 
-    def test_cmd_contract_prints_full_contract(self):
+    def test_cmd_contract_prints_resolved_contract(self):
+        # cmd_contract prints the CONTRACT plus a `resolved` block of absolute,
+        # [history].dir-aware paths. The static keys still match CONTRACT.
         buf = io.StringIO()
         old = sys.stdout
         sys.stdout = buf
         try:
-            rc = vb.cmd_contract(object())
+            rc = vb.cmd_contract(type("NS", (), {"config": NO_CFG})())
         finally:
             sys.stdout = old
         self.assertEqual(rc, 0)
-        self.assertEqual(json.loads(buf.getvalue()), vb.CONTRACT)
+        emitted = json.loads(buf.getvalue())
+        self.assertEqual(emitted["schema_version"], vb.CONTRACT["schema_version"])
+        self.assertEqual({k: emitted[k] for k in vb.CONTRACT}, vb.CONTRACT)
+        self.assertIn("resolved", emitted)
+        for k in ("progress", "stream", "history", "daemon_info"):
+            self.assertTrue(emitted["resolved"][k])
 
 
 class ProgressWriterMatchesContract(unittest.TestCase):

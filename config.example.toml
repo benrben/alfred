@@ -81,6 +81,11 @@ size_threshold = 0                  # chars above this are saved to a file (0 = 
 save_dir = "~/Documents/VoiceBridge"
 save_format = "md"                  # "md" or "txt"
 keep_audio = false                  # keep the recording after transcription
+# In "paste" mode, snapshot the clipboard before pasting and restore it after,
+# so a dictation doesn't clobber whatever you had copied. Off by default: the
+# front-ends can still read the result from the clipboard as a fallback on older
+# builds; enable once your front-ends read the result from the VB_RESULT line.
+restore_clipboard = false
 
 [history]
 enabled = true

@@ -52,10 +52,14 @@ class ModesCatalog(unittest.TestCase):
         self.assertIsInstance(catalog, list)
         keys = {m["key"] for m in catalog}
         self.assertTrue(BUILTIN_KEYS.issubset(keys))
-        # Every entry carries the picker fields the front-end relies on.
+        # Every entry carries the picker fields the front-end relies on,
+        # including the ready-made `flags` argv so front-ends don't re-derive it.
         for m in catalog:
-            for field in ("key", "label", "description", "prompt", "default"):
+            for field in ("key", "label", "description", "prompt", "default",
+                          "flags"):
                 self.assertIn(field, m)
+            self.assertIsInstance(m["flags"], list)
+            self.assertIn("--mode", m["flags"])
 
     def test_exactly_one_default_matches_config_mode(self):
         rc, out = _run(vb.cmd_modes, _ns())
@@ -81,6 +85,10 @@ class SettingsJson(unittest.TestCase):
             self.assertIn(key, proc)
         self.assertIsInstance(proc["rewrite"], bool)
         self.assertIn("opus", s["claude_models"])   # built-in preset list
+        # stt block exposes the vocab/initial_prompt knob for the front-end UI.
+        self.assertIn("stt", s)
+        for key in ("language", "initial_prompt"):
+            self.assertIn(key, s["stt"])
 
 
 class HistoryLedger(unittest.TestCase):

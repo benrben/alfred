@@ -105,6 +105,58 @@ class ConfigWriter(unittest.TestCase):
         self.assertIn('mode = "commit"', out)
         self.assertIn("# default intent (inline comment)", out)
 
+    def test_set_stt_writes_initial_prompt(self):
+        rc = _quiet(vb.cmd_set_stt,
+                    self._ns(initial_prompt="Reich, Alfred, mlx", language=None))
+        self.assertEqual(rc, 0)
+        cfg = vb.load_config(str(self.path))
+        self.assertEqual(cfg["stt"]["initial_prompt"], "Reich, Alfred, mlx")
+        self.assertIn("# Alfred config",
+                      self.path.read_text(encoding="utf-8"))   # comments kept
+
+
+class SetIntentWriter(unittest.TestCase):
+    """set-intent now uses tomlkit (not regex). The .bak must hold the PRISTINE
+    pre-edit file so a restore recovers the previous prompt, a prompt containing
+    a '[' line must not corrupt the file, and existing extra keys survive."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = Path(self.dir) / "config.toml"
+        self.path.write_text(
+            '[intent.email]\nprompt = "old prompt"\nreplace = true\n\n'
+            '# keep me\n[llm]\nbackend = "local"\n', encoding="utf-8")
+
+    def _ns(self, **kw):
+        kw.setdefault("config", str(self.path))
+        kw.setdefault("label", None)
+        kw.setdefault("description", None)
+        return type("NS", (), kw)()
+
+    def test_overwrite_keeps_pristine_bak_and_extra_keys(self):
+        rc = _quiet(vb.cmd_set_intent,
+                    self._ns(key="email",
+                             prompt="new line\n[not a table] still prompt"))
+        self.assertEqual(rc, 0)
+        cfg = vb.load_config(str(self.path))
+        cat = {m["key"]: m for m in vb.mode_catalog(cfg)}
+        self.assertIn("[not a table]", cat["email"]["prompt"])   # no truncation
+        self.assertTrue(cat["email"].get("replace"))             # extra key kept
+        self.assertEqual(cfg["llm"]["backend"], "local")         # other section intact
+        bak = self.path.with_suffix(self.path.suffix + ".bak")
+        self.assertIn("old prompt", bak.read_text(encoding="utf-8"))  # pristine
+
+    def test_add_new_intent(self):
+        rc = _quiet(vb.cmd_set_intent,
+                    self._ns(key="standup", prompt="Summarize as standup notes"))
+        self.assertEqual(rc, 0)
+        cat = {m["key"]: m for m in vb.mode_catalog(vb.load_config(str(self.path)))}
+        self.assertIn("standup", cat)
+
+    def test_invalid_key_rejected(self):
+        rc = _quiet(vb.cmd_set_intent, self._ns(key="bad key!", prompt="x"))
+        self.assertEqual(rc, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -40,6 +40,7 @@ class FakeSink(vb.Sink):
 
     def paste(self):
         self.pastes += 1
+        return True                 # keystroke "delivered"
 
 
 def _cfg(**output):
@@ -51,9 +52,9 @@ def _cfg(**output):
 class DeliverRouting(unittest.TestCase):
     def test_short_text_is_copied(self):
         sink = FakeSink()
-        kind, path = vb.deliver("hello", _cfg(size_threshold=2000), False,
-                                sink=sink)
-        self.assertEqual((kind, path), ("copied", None))
+        kind, path, paste_ok = vb.deliver("hello", _cfg(size_threshold=2000),
+                                          False, sink=sink)
+        self.assertEqual((kind, path, paste_ok), ("copied", None, None))
         self.assertEqual(sink.copied, ["hello"])
         self.assertEqual(sink.written, [])
         self.assertEqual(sink.pastes, 0)
@@ -61,10 +62,11 @@ class DeliverRouting(unittest.TestCase):
     def test_over_threshold_is_saved_to_file(self):
         sink = FakeSink()
         big = "x" * 3000
-        kind, path = vb.deliver(big, _cfg(size_threshold=2000), False,
-                                sink=sink)
+        kind, path, paste_ok = vb.deliver(big, _cfg(size_threshold=2000), False,
+                                          sink=sink)
         self.assertEqual(kind, "saved")
         self.assertIsNotNone(path)                  # the saved file path
+        self.assertIsNone(paste_ok)                 # no paste attempted
         self.assertEqual(len(sink.written), 1)
         text, written_path = sink.written[0]
         self.assertEqual(text, big)
@@ -76,33 +78,62 @@ class DeliverRouting(unittest.TestCase):
         # size_threshold = 0 disables saving: even huge text is copied.
         sink = FakeSink()
         big = "y" * 5000
-        kind, path = vb.deliver(big, _cfg(size_threshold=0), False, sink=sink)
+        kind, path, _ = vb.deliver(big, _cfg(size_threshold=0), False, sink=sink)
         self.assertEqual((kind, path), ("copied", None))
         self.assertEqual(sink.copied, [big])
         self.assertEqual(sink.written, [])
 
     def test_do_paste_calls_paste_after_copy(self):
         sink = FakeSink()
-        kind, path = vb.deliver("hi", _cfg(size_threshold=2000), True,
-                                sink=sink)
-        self.assertEqual((kind, path), ("copied", None))
+        kind, path, paste_ok = vb.deliver("hi", _cfg(size_threshold=2000), True,
+                                          sink=sink)
+        self.assertEqual((kind, path, paste_ok), ("copied", None, True))
         self.assertEqual(sink.copied, ["hi"])
         self.assertEqual(sink.pastes, 1)
+
+    def test_paste_failure_is_reported(self):
+        # A sink whose paste() returns False -> deliver reports paste_ok=False.
+        class FailPaste(FakeSink):
+            def paste(self):
+                self.pastes += 1
+                return False
+        sink = FailPaste()
+        kind, _, paste_ok = vb.deliver("hi", _cfg(size_threshold=2000), True,
+                                       sink=sink)
+        self.assertEqual(kind, "copied")
+        self.assertIs(paste_ok, False)
 
     def test_empty_text_is_empty_no_side_effects(self):
         for txt in ("", "   ", "\n\t  "):
             sink = FakeSink()
-            kind, path = vb.deliver(txt, _cfg(), True, sink=sink)
-            self.assertEqual((kind, path), ("empty", None))
+            kind, path, paste_ok = vb.deliver(txt, _cfg(), True, sink=sink)
+            self.assertEqual((kind, path, paste_ok), ("empty", None, None))
             self.assertEqual(sink.copied, [])
             self.assertEqual(sink.written, [])
             self.assertEqual(sink.pastes, 0)
+
+    def test_restore_clipboard_snapshots_and_restores_in_paste_mode(self):
+        # With restore_clipboard on, paste mode snapshots the prior clipboard and
+        # puts it back after pasting (so dictation doesn't destroy it).
+        class SnapSink(FakeSink):
+            def __init__(self):
+                super().__init__()
+                self.restored = []
+            def snapshot(self):
+                return "PRIOR"
+            def restore(self, data):
+                self.restored.append(data)
+        sink = SnapSink()
+        vb.deliver("new text", _cfg(size_threshold=2000, restore_clipboard=True),
+                   True, sink=sink)
+        self.assertEqual(sink.copied, ["new text"])   # result copied for the paste
+        self.assertEqual(sink.restored, ["PRIOR"])    # user's clipboard restored
 
     def test_saved_path_uses_configured_format_and_dir(self):
         sink = FakeSink()
         cfg = _cfg(size_threshold=10, save_dir="/tmp/vb-test-out",
                    save_format="txt")
-        _, path = vb.deliver("x" * 50, cfg, False, sink=sink)
+        _, path, _ = vb.deliver("x" * 50, cfg, False, sink=sink)
         self.assertTrue(path.startswith(os.path.expanduser("/tmp/vb-test-out")))
         self.assertTrue(path.endswith(".txt"))
 

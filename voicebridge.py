@@ -19,14 +19,18 @@ subscription login rather than silently billing an API key.
 
 Commands:
     voicebridge.py process <audio.wav>     transcribe + pipeline + deliver
+    voicebridge.py stream-start <wav>       begin transcribing a growing WAV (daemon)
+    voicebridge.py stream-finish <wav>      finish a streamed recording + deliver
     voicebridge.py text ["..."|-]          run pipeline on text (Type mode/tests)
     voicebridge.py history [--copy N]       list / re-copy recent results
     voicebridge.py modes                    list rewrite modes as JSON (front-end)
     voicebridge.py serve [--port N]         warm background engine (localhost HTTP)
+    voicebridge.py contract                 print the IPC contract as JSON
     voicebridge.py doctor                   check the environment
 
 Run `voicebridge.py --help` or `voicebridge.py <cmd> --help` for flags.
-(set-intent, set-model and settings exist too; they back the front-end's menus.)
+(set-intent, set-model, set-processing and settings exist too; they back the
+front-end's menus.)
 """
 
 from __future__ import annotations
@@ -46,6 +50,10 @@ from pathlib import Path
 
 # Sentinel printed on stdout for the front-end to parse. Always the LAST line.
 STATUS = "VB_STATUS"
+# Sentinel for the machine-readable result text, emitted (JSON-encoded, so it
+# survives newlines) on the line BEFORE the final VB_STATUS. Lets a front-end
+# read the exact delivered text without depending on the clipboard.
+RESULT = "VB_RESULT"
 
 # Force UTF-8 stdio even when launched by a GUI with a non-UTF-8 locale (macOS
 # can default to mac-roman, which mangles curly quotes / em dashes / Hebrew).
@@ -143,6 +151,11 @@ DAEMON_PORT = 8763
 # or status sentinel is duplicated. `contract_paths()` expands the "~/..."
 # templates (honouring [history].dir). Exposed via `voicebridge.py contract`
 # and GET /contract so a front-end can read it instead of hard-coding.
+# schema_version: bump ONLY on a backward-INCOMPATIBLE change; new fields are
+# added additively within a version (front-ends read what they know and ignore
+# the rest). Both front-ends compare their built-in fallback version against the
+# engine's and warn the user when the MAJOR version differs (engine/front-end out
+# of sync). See docs/COMPAT or the "compatibility" note in the README.
 CONTRACT: dict = {
     "schema_version": 1,
     "daemon": {
@@ -150,9 +163,18 @@ CONTRACT: dict = {
         "port": DAEMON_PORT,
         "url": "http://127.0.0.1:{port}/",
         "request": {"method": "POST", "path": "/", "body": {"argv": ["<str>"]}},
-        "response": {"code": "int", "out": "str"},
+        # `err` carries the request's captured stderr (error detail) so a
+        # front-end can show WHAT failed. Added additively; older daemons omit it
+        # and front-ends treat a missing err as "".
+        "response": {"code": "int", "out": "str", "err": "str"},
         "health": {"method": "GET", "path": "/"},
+        # GET / responds with this identity so a front-end (and `serve` itself on
+        # a busy port) can tell an Alfred daemon from a foreign server.
+        "identity": {"app": "alfred", "schema_version": "int", "pid": "int",
+                     "ok": "bool"},
         "contract": {"method": "GET", "path": "/contract"},
+        # Discovery/identity file written on startup (mode 0600).
+        "info_file": "~/.voicebridge/daemon.json",
     },
     "status_line": {
         "sentinel": STATUS,
@@ -167,6 +189,24 @@ CONTRACT: dict = {
         "error_subtypes": ["audio_not_found", "stt_failed", "llm_failed",
                            "runtime"],
         "llm_failed_suffix": "llm_failed",
+        # A 'copied' status line may carry a trailing 'paste_failed' flag when
+        # auto-paste was requested but the keystroke could not be delivered
+        # (usually a missing Accessibility grant for the app that owns the engine).
+        "paste_failed_suffix": "paste_failed",
+        # Optional machine-readable result line emitted just BEFORE the final
+        # VB_STATUS: "VB_RESULT<sep><json-encoded text>". Front-ends prefer it
+        # over reading the clipboard; absent on older engines / the --stdout path.
+        "result_sentinel": RESULT,
+    },
+    # The recording format the streaming STT reader depends on (int16 mono
+    # 16 kHz WAV). Front-ends build their `sox` recorder command from this so the
+    # invariant lives in one place instead of being copy-pasted per front-end.
+    "audio": {
+        "rate": 16000,
+        "channels": 1,
+        "bits": 16,
+        "format": "wav",
+        "sox_args": ["-d", "-S", "-r", "16000", "-c", "1", "-b", "16"],
     },
     "files": {
         "progress": {
@@ -180,7 +220,8 @@ CONTRACT: dict = {
         "stream": {
             "path": "~/.voicebridge/stream.json",
             "schema": {"transcript": "str", "recording": "bool",
-                       "done": "bool", "ts": "int_epoch_ms"},
+                       "done": "bool", "ts": "int_epoch_ms",
+                       "path": "str"},
         },
         "history": {
             "path": str(Path(DEFAULTS["history"]["dir"]) / "history.jsonl"),
@@ -213,6 +254,29 @@ def contract_paths(cfg: dict | None = None) -> dict:
     }
 
 
+def _daemon_info_path() -> Path:
+    return Path(CONTRACT["daemon"]["info_file"]).expanduser()
+
+
+def resolved_contract(cfg: dict | None = None) -> dict:
+    """The CONTRACT with a `resolved` block of ABSOLUTE, config-aware paths.
+
+    The static CONTRACT carries "~/..." templates and the DEFAULT history path;
+    front-ends that honour [history].dir need the real resolved locations. This
+    merges those in without mutating CONTRACT, and is what `contract` / GET
+    /contract actually emit."""
+    paths = contract_paths(cfg)
+    resolved = {
+        "progress": str(paths["progress"]),
+        "stream": str(paths["stream"]),
+        "history": str(paths["history"]),
+        "daemon_info": str(_daemon_info_path()),
+        "config": str(cfg.get("_loaded_from")) if cfg and cfg.get("_loaded_from")
+        else "",
+    }
+    return {**CONTRACT, "resolved": resolved}
+
+
 def _deep_merge(base: dict, over: dict) -> dict:
     out = dict(base)
     for k, v in over.items():
@@ -236,8 +300,20 @@ def load_config(path: str | None) -> dict:
                     "using built-in defaults.\n"
                 )
                 break
-            with open(p.expanduser(), "rb") as fh:
-                cfg = _deep_merge(cfg, tomllib.load(fh))
+            try:
+                with open(p.expanduser(), "rb") as fh:
+                    cfg = _deep_merge(cfg, tomllib.load(fh))
+            except tomllib.TOMLDecodeError as e:
+                # A hand-edit typo must not brick every command (dictation, and
+                # even `doctor`). Warn, remember the error for doctor to surface,
+                # and fall back to built-in defaults so the tool keeps working.
+                sys.stderr.write(
+                    f"warning: config.toml is invalid ({p.expanduser()}): {e}; "
+                    "using built-in defaults.\n"
+                )
+                cfg = json.loads(json.dumps(DEFAULTS))
+                cfg["_config_error"] = f"{p.expanduser()}: {e}"
+                break
             cfg["_loaded_from"] = str(p.expanduser())
             break
     return cfg
@@ -319,6 +395,40 @@ _STREAM_MAX = 18 * 16000         # … but no later than 18s (Whisper likes <=30
 _STREAM_FRAME = 800              # 50ms silence-search frame
 
 
+def _secure_dir(path: Path) -> None:
+    """Create a directory and tighten it to owner-only (0700). The IPC + history
+    files under ~/.voicebridge hold verbatim dictation, which is personal data —
+    default 0755 would let any other local `staff` account read it."""
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:                                   # noqa: S110
+        pass
+
+
+def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
+    """Write `text` to `path` atomically and owner-only: a temp file in the same
+    dir + os.replace (atomic on APFS), created 0600. A high-frequency poller
+    therefore never reads a half-written file, and a crash mid-write can't
+    truncate the real file."""
+    _secure_dir(path.parent)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(str(tmp), str(path))
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:                              # already renamed away
+            pass
+
+
+def _atomic_write_json(path: Path, obj) -> None:
+    _atomic_write_text(path, json.dumps(obj))
+
+
 def _wav_data_offset(path: str) -> int:
     """Byte offset of PCM samples inside a WAV (the 'data' chunk), or 44."""
     try:
@@ -387,6 +497,7 @@ class StreamSession:
         self.lock = threading.Lock()
         self.stop = False
         self.done = False
+        self.started = time.monotonic()
         self.thread: threading.Thread | None = None
 
     @property
@@ -422,6 +533,7 @@ class StreamSession:
         return True
 
     def _run(self) -> None:
+        idle = 0
         while not self.stop:
             worked = False
             try:
@@ -429,6 +541,16 @@ class StreamSession:
                     worked = self._chunk_once()
             except Exception as e:                       # noqa: BLE001
                 sys.stderr.write(f"stream chunk error: {e}\n")
+            if worked:
+                idle = 0
+            else:
+                idle += 1
+                # Self-terminate an abandoned session: a cancelled/crashed
+                # recording never calls stream-finish, so without this the thread
+                # would poll a dead file forever in the long-lived daemon.
+                if idle >= _STREAM_ABANDON_POLLS:
+                    sys.stderr.write("stream: no new audio; abandoning session\n")
+                    self.stop = True
             time.sleep(0.2 if worked else 1.0)
 
     def start(self) -> None:
@@ -455,19 +577,28 @@ class StreamSession:
         return self.text, self.last_lang
 
     def _write(self) -> None:
+        # A superseded/abandoned session must not clobber the shared stream.json
+        # that the current recording's HUD is reading. Only the active session
+        # (or one still finishing, when none is active) writes.
+        if _ACTIVE_STREAM is not None and _ACTIVE_STREAM is not self:
+            return
         try:
-            p = _stream_path()
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps({
+            _atomic_write_json(_stream_path(), {
                 "transcript": self.text, "recording": not self.stop,
-                "done": self.done, "ts": _now_ms(),
-            }), encoding="utf-8")
+                "done": self.done, "ts": _now_ms(), "path": self.path,
+            })
         except Exception:                                # noqa: BLE001
             pass
 
 
+# How many ~1s idle polls before a session with no growing audio gives up.
+_STREAM_ABANDON_POLLS = 120
+# Hard TTL: a session older than this is reaped on the next stream-start.
+_STREAM_TTL = 900
+
 _STREAMS: dict[str, StreamSession] = {}
 _STREAMS_LOCK = threading.Lock()
+_ACTIVE_STREAM: StreamSession | None = None      # the session that owns stream.json
 
 
 # ----------------------------------------------------------------------------
@@ -483,6 +614,22 @@ _EXTRA_BIN_DIRS = [
     os.path.expanduser("~/.cargo/bin"),
     os.path.expanduser("~/.bun/bin"),
 ]
+
+
+# Env vars stripped before spawning each CLI so it uses the subscription login,
+# never an API key — AND never a cloud gateway/router. The keyless + "nothing
+# leaves the machine" promise depends on dropping the provider-routing vars too:
+# a stray CLAUDE_CODE_USE_BEDROCK / ANTHROPIC_BASE_URL / OPENAI_BASE_URL in the
+# user's shell would silently bill a cloud provider or route dictation text to an
+# unexpected endpoint. (The keyless guarantee also assumes fast mode, which adds
+# --setting-sources "" so a settings apiKeyHelper can't re-inject a key.)
+_CLAUDE_KEY_VARS = [
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+    "ANTHROPIC_BASE_URL", "ANTHROPIC_BEDROCK_BASE_URL",
+    "ANTHROPIC_VERTEX_BASE_URL",
+]
+_CODEX_KEY_VARS = ["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"]
 
 
 def find_tool(name: str) -> str | None:
@@ -561,13 +708,23 @@ def _clean_env(drop: list[str]) -> dict:
 
 
 def _run(cmd: list[str], env: dict, timeout: int) -> str:
-    proc = subprocess.run(
-        cmd, env=env, timeout=timeout,
-        cwd=tempfile.gettempdir(),       # neutral dir: don't scan user's project
-        input="",                        # close stdin so the CLI doesn't wait on it
-        capture_output=True, text=True,
-        encoding="utf-8", errors="replace",  # decode CLI output as UTF-8, not locale
-    )
+    try:
+        proc = subprocess.run(
+            cmd, env=env, timeout=timeout,
+            cwd=tempfile.gettempdir(),   # neutral dir: don't scan user's project
+            input="",                    # close stdin so the CLI doesn't wait on it
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",  # decode as UTF-8, not locale
+        )
+    except subprocess.TimeoutExpired as e:
+        # Speak the one exception type the fallback loop understands, so a hung
+        # CLI in `auto` mode falls back to the next backend instead of aborting.
+        # Don't embed str(e) — it includes the full command (and thus the prompt).
+        raise RuntimeError(
+            f"{os.path.basename(cmd[0])} timed out after {timeout}s") from None
+    except OSError as e:
+        # Binary vanished between find_tool and exec, permission denied, etc.
+        raise RuntimeError(f"{os.path.basename(cmd[0])} failed to run: {e}") from e
     if proc.returncode != 0:
         lines = [l for l in (proc.stderr or proc.stdout or "").splitlines() if l.strip()]
         # Prefer a real error line over generic warnings / progress noise.
@@ -741,8 +898,9 @@ def run_llm(backend: str, prompt: str, cfg: dict) -> str:
     if backend == "local":
         return run_local_llm(prompt, cfg)
     if backend == "claude":
-        # Strip API-key vars so claude uses the subscription OAuth login.
-        env = _clean_env(["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"])
+        # Strip API-key + provider-routing vars so claude uses the subscription
+        # OAuth login and never a cloud gateway.
+        env = _clean_env(_CLAUDE_KEY_VARS)
         warm = _get_warm(cfg, env)
         if warm is not None:
             try:
@@ -775,8 +933,8 @@ def run_llm(backend: str, prompt: str, cfg: dict) -> str:
             cmd += ["-m", cfg["llm"]["codex_model"]]
         cmd += list(cfg["llm"].get("codex_extra_args") or [])
         cmd += [prompt]
-        # Strip API-key vars so codex uses the ChatGPT login, not the API.
-        env = _clean_env(["OPENAI_API_KEY", "CODEX_API_KEY"])
+        # Strip API-key + routing vars so codex uses the ChatGPT login, not the API.
+        env = _clean_env(_CODEX_KEY_VARS)
         return run_llm_clean(cmd, env, timeout)
     raise RuntimeError(f"unknown backend '{backend}'")
 
@@ -1107,7 +1265,7 @@ def _macos_tool(name: str) -> str:
 # inject a fake sink to assert routing without touching the clipboard or disk.
 
 class Sink:
-    """The output side effects. Subclasses implement the three primitives."""
+    """The output side effects. Subclasses implement the primitives."""
 
     def copy(self, text: str) -> None:
         raise NotImplementedError
@@ -1115,8 +1273,19 @@ class Sink:
     def write_file(self, text: str, path: str) -> str:
         raise NotImplementedError
 
-    def paste(self) -> None:
+    def paste(self) -> bool:
+        """Send Cmd+V. Return True if the keystroke was delivered, False if it
+        could not be (e.g. no Accessibility grant)."""
         raise NotImplementedError
+
+    def snapshot(self) -> str | None:
+        """Return the current clipboard contents (for save/restore), or None."""
+        return None
+
+    def restore(self, data: str | None) -> None:
+        """Put previously-snapshotted clipboard contents back."""
+        if data is not None:
+            self.copy(data)
 
 
 class MacosSink(Sink):
@@ -1142,12 +1311,27 @@ class MacosSink(Sink):
         p.write_text(text, encoding="utf-8")
         return str(p)
 
-    def paste(self) -> None:
-        subprocess.run(
-            [_macos_tool("osascript"), "-e",
-             'tell application "System Events" to keystroke "v" using command down'],
-            check=False,
-        )
+    def paste(self) -> bool:
+        # osascript exits nonzero when the controlling process lacks the
+        # Accessibility grant, so returncode tells us whether the paste landed.
+        try:
+            proc = subprocess.run(
+                [_macos_tool("osascript"), "-e",
+                 'tell application "System Events" to keystroke "v" using '
+                 'command down'],
+                capture_output=True, text=True, check=False,
+            )
+        except OSError:
+            return False
+        return proc.returncode == 0
+
+    def snapshot(self) -> str | None:
+        try:
+            proc = subprocess.run([_macos_tool("pbpaste")], capture_output=True,
+                                  text=True, encoding="utf-8", check=False)
+        except OSError:
+            return None
+        return proc.stdout if proc.returncode == 0 else None
 
 
 # The default sink, shared by the thin module-level wrappers below.
@@ -1178,20 +1362,32 @@ def save_to_file(text: str, cfg: dict) -> str:
 
 
 def deliver(text: str, cfg: dict, do_paste: bool,
-            sink: Sink | None = None) -> tuple[str, str | None]:
+            sink: Sink | None = None) -> tuple[str, str | None, bool | None]:
     """Pure routing over an injected sink: empty -> nothing; over the size
     threshold -> save to a file; otherwise copy (and paste if asked). Returns
-    (kind, path) where path is set only for the 'saved' kind."""
+    (kind, path, paste_ok): path is set only for 'saved'; paste_ok is None when
+    no paste was attempted, else whether the keystroke landed.
+
+    With [output].restore_clipboard = true, paste mode snapshots the user's
+    clipboard first and restores it afterwards, so dictation doesn't destroy
+    whatever they had copied (front-ends read the text from VB_RESULT, not the
+    clipboard). Off by default for backward compatibility."""
     sink = sink or MacosSink()
     if not text.strip():
-        return "empty", None
+        return "empty", None, None
     threshold = int(cfg["output"]["size_threshold"])
     if threshold > 0 and len(text) > threshold:      # 0 = never save, always copy
-        return "saved", sink.write_file(text, _save_path(cfg))
+        return "saved", sink.write_file(text, _save_path(cfg)), None
+    if not do_paste:
+        sink.copy(text)
+        return "copied", None, None
+    restore = bool(cfg["output"].get("restore_clipboard", False))
+    prior = sink.snapshot() if restore else None
     sink.copy(text)
-    if do_paste:
-        sink.paste()
-    return "copied", None
+    paste_ok = sink.paste() is not False             # None (fake) -> treated ok
+    if restore and paste_ok:
+        sink.restore(prior)
+    return "copied", None, paste_ok
 
 
 # ----------------------------------------------------------------------------
@@ -1202,19 +1398,29 @@ def history_path(cfg: dict) -> Path:
     return contract_paths(cfg)["history"]
 
 
+_HISTORY_LOCK = threading.Lock()
+
+
 def history_append(text: str, cfg: dict, source: str) -> None:
     if not cfg["history"]["enabled"] or not text.strip():
         return
     p = history_path(cfg)
-    p.parent.mkdir(parents=True, exist_ok=True)
     rec = {"ts": _dt.datetime.now().isoformat(timespec="seconds"),
            "source": source, "chars": len(text), "text": text}
-    lines = []
-    if p.exists():
-        lines = p.read_text(encoding="utf-8").splitlines()
-    lines.append(json.dumps(rec, ensure_ascii=False))
-    lines = lines[-int(cfg["history"]["max_items"]):]
-    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    line = json.dumps(rec, ensure_ascii=False)
+    max_items = int(cfg["history"]["max_items"])
+    # Lock so two concurrent daemon requests can't lose an entry, and append
+    # (0600) so a crash can't destroy the whole file; only rewrite to trim.
+    with _HISTORY_LOCK:
+        _secure_dir(p.parent)
+        fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+        if max_items > 0:
+            existing = [l for l in p.read_text(encoding="utf-8").splitlines()
+                        if l.strip()]
+            if len(existing) > max_items:
+                _atomic_write_text(p, "\n".join(existing[-max_items:]) + "\n")
 
 
 # ----------------------------------------------------------------------------
@@ -1224,6 +1430,26 @@ def history_append(text: str, cfg: dict, source: str) -> None:
 def print_status(*parts: str) -> None:
     sl = CONTRACT["status_line"]
     print(sl["sentinel"] + sl["sep"] + sl["sep"].join(parts))
+
+
+def print_result(text: str) -> None:
+    """Emit the machine-readable result line (JSON-encoded so newlines survive)
+    just BEFORE the final VB_STATUS. Lets a front-end read the exact delivered
+    text without racing the clipboard. Best-effort: never the last line."""
+    sl = CONTRACT["status_line"]
+    print(sl["result_sentinel"] + sl["sep"] + json.dumps(text, ensure_ascii=False))
+
+
+def _status_parts(kind: str, path: str | None, paste_ok: bool | None,
+                  *extra: str) -> list[str]:
+    """Assemble the VB_STATUS fields: kind, optional saved path, then any
+    suffixes (a trailing 'paste_failed' when a requested paste didn't land,
+    plus caller extras like 'llm_failed')."""
+    parts = [kind] + ([path] if path else [])
+    if paste_ok is False:
+        parts.append(CONTRACT["status_line"]["paste_failed_suffix"])
+    parts.extend(extra)
+    return parts
 
 
 # ----------------------------------------------------------------------------
@@ -1266,12 +1492,10 @@ class _Progress:
 
     def _write(self, phase: str, label: str, ts: int) -> None:
         try:
-            p = _progress_path()
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps({
+            _atomic_write_json(_progress_path(), {
                 "phase": phase, "label": label, "ts": ts,
                 "start": self.start, "steps": self.steps,
-            }), encoding="utf-8")
+            })
         except Exception:                          # noqa: BLE001
             pass
 
@@ -1302,10 +1526,17 @@ def _apply_overrides(cfg: dict, args) -> dict:
     if args.backend:
         cfg["llm"]["backend"] = args.backend
     if args.model:
-        # apply to whichever backend will run
-        cfg["llm"]["claude_model"] = args.model
-        cfg["llm"]["codex_model"] = args.model
-        cfg["llm"]["local_model"] = args.model
+        # Apply to ONLY the backend that will actually run (resolved after the
+        # --backend override above). Fanning out to all three broke auto-fallback
+        # — a claude alias handed to codex guarantees the fallback fails — and
+        # risked overwriting local_model with a non-HF id.
+        backend = cfg["llm"]["backend"]
+        if backend == "local":
+            cfg["llm"]["local_model"] = args.model
+        elif backend == "codex":
+            cfg["llm"]["codex_model"] = args.model
+        else:                                    # "claude", or "auto" -> primary
+            cfg["llm"]["claude_model"] = args.model
     if args.language:
         cfg["stt"]["language"] = args.language
     if args.mode:
@@ -1337,10 +1568,11 @@ def _finish_capture(text: str, cfg: dict, args, prog: "_Progress") -> int:
         # Resilient: still deliver the raw transcript so nothing is lost.
         sys.stderr.write(f"warning: LLM step failed, using raw transcript: {e}\n")
         prog.step("delivering", "LLM failed — delivering raw transcript")
-        kind, path = deliver(text, cfg, cfg["output"]["mode"] == "paste")
+        kind, path, paste_ok = deliver(text, cfg, cfg["output"]["mode"] == "paste")
         history_append(text, cfg, "stt")
         prog.done("done", "Done (raw transcript)")
-        print_status(*([kind, path] if path else [kind]), "llm_failed")
+        print_result(text)
+        print_status(*_status_parts(kind, path, paste_ok, "llm_failed"))
         return 0
 
     if getattr(args, "stdout", False):
@@ -1349,11 +1581,24 @@ def _finish_capture(text: str, cfg: dict, args, prog: "_Progress") -> int:
         return 0
 
     prog.step("delivering", "Delivering")
-    kind, path = deliver(final, cfg, cfg["output"]["mode"] == "paste")
+    kind, path, paste_ok = deliver(final, cfg, cfg["output"]["mode"] == "paste")
     history_append(final, cfg, "stt")
     prog.done()
-    print_status(*([kind, path] if path else [kind]))
+    print_result(final)
+    print_status(*_status_parts(kind, path, paste_ok))
     return 0
+
+
+def _maybe_remove_audio(audio: str, cfg: dict) -> None:
+    """Delete the recording unless [output].keep_audio is set. Called on BOTH the
+    success and failure paths so a failed transcription doesn't leave the WAV
+    (verbatim audio) sitting in a world-readable /tmp forever."""
+    if cfg["output"]["keep_audio"]:
+        return
+    try:
+        os.remove(audio)
+    except OSError:
+        pass
 
 
 def cmd_process(args) -> int:
@@ -1382,15 +1627,12 @@ def cmd_process(args) -> int:
         )
     except Exception as e:                       # noqa: BLE001
         sys.stderr.write(f"error: transcription failed: {e}\n")
+        _maybe_remove_audio(audio, cfg)
         prog.done("error", "Transcription failed")
         print_status("error", "stt_failed")
         return 1
 
-    if not cfg["output"]["keep_audio"]:
-        try:
-            os.remove(audio)
-        except OSError:
-            pass
+    _maybe_remove_audio(audio, cfg)
 
     if not text:
         sys.stderr.write("note: no speech detected.\n")
@@ -1406,14 +1648,23 @@ def cmd_stream_start(args) -> int:
     """Begin transcribing a growing WAV in the background, so most of it is done
     by the time recording stops. Only useful inside the warm daemon (the session
     lives in its process); a one-shot run would exit immediately."""
+    global _ACTIVE_STREAM
     cfg = _apply_overrides(load_config(args.config), args)
     wt = whisper_translate_active(cfg)
     sess = StreamSession(args.audio, cfg, cfg["stt"]["language"], wt)
+    now = time.monotonic()
     with _STREAMS_LOCK:
+        # Reap abandoned sessions (recording cancelled/crashed without a
+        # stream-finish) so their threads and dict entries don't leak.
+        for k, s in list(_STREAMS.items()):
+            if s.stop or now - s.started > _STREAM_TTL:
+                s.stop = True
+                _STREAMS.pop(k, None)
         old = _STREAMS.get(args.audio)
         if old:
             old.stop = True
         _STREAMS[args.audio] = sess
+        _ACTIVE_STREAM = sess
     sess.start()
     print_status("streaming")
     return 0
@@ -1433,6 +1684,7 @@ def cmd_stream_finish(args) -> int:
             text, lang = sess.finish()
         except Exception as e:                        # noqa: BLE001
             sys.stderr.write(f"error: stream finish failed: {e}\n")
+            _maybe_remove_audio(args.audio, cfg)
             prog.done("error", "Transcription failed")
             print_status("error", "stt_failed")
             return 1
@@ -1446,14 +1698,11 @@ def cmd_stream_finish(args) -> int:
                                     whisper_translate=wt)
         except Exception as e:                        # noqa: BLE001
             sys.stderr.write(f"error: transcription failed: {e}\n")
+            _maybe_remove_audio(args.audio, cfg)
             prog.done("error", "Transcription failed")
             print_status("error", "stt_failed")
             return 1
-    if not cfg["output"]["keep_audio"]:
-        try:
-            os.remove(args.audio)
-        except OSError:
-            pass
+    _maybe_remove_audio(args.audio, cfg)
     if not text:
         prog.done("empty", "No speech detected")
         print_status("empty")
@@ -1480,9 +1729,10 @@ def cmd_text(args) -> int:
     if args.stdout:
         sys.stdout.write(final + "\n")
         return 0
-    kind, path = deliver(final, cfg, cfg["output"]["mode"] == "paste")
+    kind, path, paste_ok = deliver(final, cfg, cfg["output"]["mode"] == "paste")
     history_append(final, cfg, "text")
-    print_status(*([kind, path] if path else [kind]))
+    print_result(final)
+    print_status(*_status_parts(kind, path, paste_ok))
     return 0
 
 
@@ -1492,7 +1742,14 @@ def cmd_history(args) -> int:
     if not p.exists():
         print("(no history yet)")
         return 0
-    recs = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+    recs = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            recs.append(json.loads(line))
+        except (json.JSONDecodeError, ValueError):
+            continue                                 # skip a corrupt line, keep going
     if args.copy is not None:
         idx = args.copy
         try:
@@ -1521,6 +1778,10 @@ def cmd_modes(args) -> int:
                 "label": m.get("label") or m["key"],
                 "description": m.get("description", ""),
                 "prompt": m.get("prompt", ""),
+                # Ready-made argv that realizes this mode, so front-ends consume
+                # the flag grammar instead of each re-deriving it (which has
+                # drifted before). "raw"/no-LLM stays a front-end pseudo-format.
+                "flags": ["--mode", m["key"], "--rewrite"],
                 "default": m["key"] == default_mode}
                for m in mode_catalog(cfg)]
     print(json.dumps(catalog))
@@ -1529,7 +1790,17 @@ def cmd_modes(args) -> int:
 
 def _config_target(args) -> Path:
     if getattr(args, "config", None):
-        return Path(args.config).expanduser()
+        target = Path(args.config).expanduser()
+        # Inside the daemon, a --config pointing outside the known search
+        # locations is an arbitrary-path write primitive (set-intent/-model/
+        # -processing mkdir+write to it). Front-ends never pass --config over the
+        # daemon, so ignore an out-of-allowlist path there and fall back to search.
+        if _DAEMON_MODE and target.resolve() not in {p.expanduser().resolve()
+                                                      for p in CONFIG_SEARCH}:
+            sys.stderr.write(
+                "warning: ignoring out-of-allowlist --config over the daemon.\n")
+        else:
+            return target
     for p in CONFIG_SEARCH:
         if p.expanduser().is_file():
             return p.expanduser()
@@ -1543,8 +1814,16 @@ def _toml_str(s: str) -> str:
 
 
 def cmd_set_intent(args) -> int:
-    """Write/override [intent.<key>] in config.toml (keeps a .bak)."""
+    """Write/override [intent.<key>] in config.toml via tomlkit.
+
+    Uses tomlkit (like set-model/set-processing) instead of regex surgery, so a
+    prompt whose text contains a line starting with '[' can't truncate the file,
+    comments/formatting are preserved, and the .bak is the PRISTINE pre-edit file
+    (the old code backed up the already-mutated text, so a restore lost exactly
+    the prompt it was meant to protect). Existing extra keys (e.g. replace) are
+    kept."""
     import re
+    import tomlkit
     key = (args.key or "").strip()
     if not key or not re.fullmatch(r"[A-Za-z0-9_-]+", key):
         sys.stderr.write("error: intent key must be letters/numbers/-/_.\n")
@@ -1552,20 +1831,26 @@ def cmd_set_intent(args) -> int:
     path = _config_target(args)
     path.parent.mkdir(parents=True, exist_ok=True)
     text = path.read_text(encoding="utf-8") if path.is_file() else ""
-    # Drop any existing [intent.<key>] block (header + body up to next table/EOF).
-    text = re.sub(r"(?ms)^\[intent\.%s\].*?(?=^\[|\Z)" % re.escape(key), "", text)
-    lines = ["[intent.%s]" % key, "prompt = %s" % _toml_str(args.prompt)]
-    if args.label:
-        lines.append("label = %s" % _toml_str(args.label))
-    if args.description:
-        lines.append("description = %s" % _toml_str(args.description))
-    new_text = text.rstrip() + "\n\n" + "\n".join(lines) + "\n"
+    # Back up the PRISTINE file BEFORE mutating, so a restore recovers the old prompt.
     if path.is_file():
         try:
             path.with_suffix(path.suffix + ".bak").write_text(text, encoding="utf-8")
         except OSError:
             pass
-    path.write_text(new_text, encoding="utf-8")
+    doc = tomlkit.parse(text)
+    if "intent" not in doc:
+        doc["intent"] = tomlkit.table(is_super_table=True)
+    intent = doc["intent"]
+    sub = intent.get(key)
+    if not isinstance(sub, tomlkit.items.Table):
+        sub = tomlkit.table()
+    sub["prompt"] = args.prompt or ""
+    if args.label:
+        sub["label"] = args.label
+    if args.description:
+        sub["description"] = args.description
+    intent[key] = sub
+    path.write_text(tomlkit.dumps(doc), encoding="utf-8")
     ok = any(m["key"] == key for m in mode_catalog(load_config(str(path))))
     print_status("saved" if ok else "error")
     return 0 if ok else 1
@@ -1621,6 +1906,22 @@ def cmd_set_processing(args) -> int:
     return 0
 
 
+def cmd_set_stt(args) -> int:
+    """Persist [stt] settings a front-end can change — currently the vocabulary /
+    initial_prompt biasing (names, jargon, brands) and the STT language. The
+    highest-churn STT knob (fixing a persistently misheard name) previously had
+    no front-end or CLI write path; this gives it one, mirroring set-model."""
+    path = _config_target(args)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if getattr(args, "initial_prompt", None) is not None:
+        _set_config_kv(path, "stt", "initial_prompt",
+                       _toml_str(args.initial_prompt))
+    if getattr(args, "language", None):
+        _set_config_kv(path, "stt", "language", _toml_str(args.language))
+    print_status("saved")
+    return 0
+
+
 # Selectable model presets per backend. Claude aliases track the latest model.
 # Extend either list from config.toml:  [llm] claude_models / codex_models = [...]
 _CLAUDE_MODELS = ["opus", "sonnet", "haiku"]
@@ -1654,14 +1955,20 @@ def cmd_settings(args) -> int:
             "optimize": bool(proc.get("optimize")),
             "translate_via": proc.get("translate_via", "llm"),
         },
+        "stt": {
+            "language": cfg["stt"].get("language", "auto"),
+            "initial_prompt": cfg["stt"].get("initial_prompt", ""),
+        },
     }))
     return 0
 
 
 def cmd_contract(args) -> int:
     """Print the IPC CONTRACT (the single source of truth the front-ends read):
-    the daemon's HTTP shape, the VB_STATUS grammar, and the state files."""
-    print(json.dumps(CONTRACT, indent=2))
+    the daemon's HTTP shape, the VB_STATUS grammar, the state files, and a
+    `resolved` block of absolute, [history].dir-aware paths."""
+    cfg = load_config(getattr(args, "config", None))
+    print(json.dumps(resolved_contract(cfg), indent=2))
     return 0
 
 
@@ -1731,6 +2038,9 @@ def cmd_doctor(args) -> int:
 
     # Config + paths
     print("-" * 40)
+    if cfg.get("_config_error"):
+        print(f"{bad}config PARSE ERROR: {cfg['_config_error']}")
+        print("    (using built-in defaults until fixed — check the file/line above)")
     print(f"config: {cfg.get('_loaded_from', '(built-in defaults)')}")
     print(f"STT model: {cfg['stt']['model']}   language: {cfg['stt']['language']}")
     print(f"stages: translate={cfg['processing']['translate']} "
@@ -1746,6 +2056,43 @@ def cmd_doctor(args) -> int:
         print(f"{ok}save_dir writable: {sd}")
     except Exception as e:                          # noqa: BLE001
         print(f"{bad}save_dir not writable: {sd} ({e})")
+
+    # macOS permissions (TCC). Auto-paste needs Accessibility for whichever app
+    # OWNS the process sending the keystroke (the app that launched the daemon —
+    # Hammerspoon or Raycast — not necessarily this terminal). This probe reports
+    # the *controlling* app's grant; it never types anything.
+    print("-" * 40)
+    if platform.system() == "Darwin":
+        try:
+            probe = subprocess.run(
+                [_macos_tool("osascript"), "-e",
+                 'tell application "System Events" to return UI elements enabled'],
+                capture_output=True, text=True, timeout=5, check=False)
+            ax = (probe.stdout or "").strip().lower()
+            if ax == "true":
+                print(f"{ok}Accessibility (auto-paste) granted for this process")
+            elif ax == "false":
+                print(f"{warn}Accessibility NOT granted — auto-paste will silently "
+                      "do nothing. Grant it to the app that runs Alfred "
+                      "(Hammerspoon/Raycast) in System Settings ▸ Privacy ▸ "
+                      "Accessibility.")
+            else:
+                print(f"{warn}Accessibility state unknown ({probe.stderr.strip()[:60]})")
+        except Exception as e:                      # noqa: BLE001
+            print(f"{warn}Accessibility check skipped ({e})")
+        print(f"{warn}Microphone: granted per-app to whatever launches `sox` "
+              "(Hammerspoon AND/OR Raycast). Grant both if you use both.")
+
+    # Running daemon (identity + owner pid), so front-ends/users can see which
+    # process owns the warm engine — auto-paste attribution follows that process.
+    who = _probe_daemon(CONTRACT["daemon"]["port"])
+    if who and who.get("app") == "alfred":
+        print(f"{ok}warm daemon: running (pid {who.get('pid')}, "
+              f"schema v{who.get('schema_version')})")
+    elif who:
+        print(f"{bad}port {CONTRACT['daemon']['port']} held by a NON-Alfred server")
+    else:
+        print(f"{warn}warm daemon: not running (starts on first capture)")
     return 0
 
 
@@ -1779,11 +2126,62 @@ def add_common(p):
                    help="print result to stdout instead of clipboard/file")
 
 
+# Serializes POST command execution so the process-global stdout/stderr redirect
+# in one request can't corrupt another's captured output (ThreadingHTTPServer
+# runs a thread per request). Requests already contend for one Whisper model, so
+# serialization costs little; GET (health/contract) is NOT locked, so liveness
+# checks still answer during a long capture.
+_POST_LOCK = threading.Lock()
+
+
+def _daemon_identity() -> dict:
+    return {"ok": True, "app": "alfred",
+            "schema_version": CONTRACT["schema_version"], "pid": os.getpid()}
+
+
+def _write_daemon_info(port: int) -> None:
+    """Write the discovery/identity file (0600) so a front-end — and `serve`
+    itself on a busy port — can tell an Alfred daemon from a foreign server."""
+    try:
+        _atomic_write_json(_daemon_info_path(),
+                           {**_daemon_identity(), "port": port})
+    except Exception:                                # noqa: BLE001
+        pass
+
+
+def _probe_daemon(port: int, timeout: float = 1.0) -> dict | None:
+    """GET / on a port and return the JSON identity, or None if it isn't a
+    reachable HTTP server we can parse."""
+    import http.client
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+        c.request("GET", "/")
+        r = c.getresponse()
+        body = r.read().decode()
+        c.close()
+        return json.loads(body)
+    except Exception:                                # noqa: BLE001
+        return None
+
+
+def _loopback_host(headers) -> bool:
+    """True if the request's Host header names loopback (or is absent). Rejecting
+    a non-loopback Host defeats DNS-rebinding: the rebound page sends the
+    attacker's hostname, not 127.0.0.1."""
+    host = (headers.get("Host") or "").strip()
+    if not host:
+        return True
+    hostname = host.rsplit(":", 1)[0].strip("[]")
+    return hostname in ("127.0.0.1", "localhost", "::1")
+
+
 def cmd_serve(args) -> int:
     """Warm background engine: load the Whisper model once and serve requests
     over localhost HTTP, so each dictation skips the multi-second model load.
     Each request is a JSON body {"argv": [...]} = the same args the one-shot CLI
-    would take; the response is {"code": int, "out": "<captured stdout>"}."""
+    would take; the response is {"code", "out", "err"} (out/err = captured
+    stdout/stderr). GET / returns the daemon's identity; GET /contract the
+    contract. Host + Origin checks block browser CSRF / DNS-rebinding."""
     import io
     import contextlib
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1813,8 +2211,7 @@ def cmd_serve(args) -> int:
         try:
             cfg = cfg0 if cfg0 is not None else load_config(args.config)
             if cfg["llm"].get("warm", True) and cfg["llm"]["backend"] != "codex":
-                warm = _get_warm(cfg, _clean_env(["ANTHROPIC_API_KEY",
-                                                  "ANTHROPIC_AUTH_TOKEN"]))
+                warm = _get_warm(cfg, _clean_env(_CLAUDE_KEY_VARS))
                 if warm is not None:
                     warm.ask("Reply with exactly: ok", 60)
                     sys.stderr.write("alfred: claude session warm.\n"); sys.stderr.flush()
@@ -1832,33 +2229,55 @@ def cmd_serve(args) -> int:
             self.wfile.write(data)
 
         def do_GET(self):
+            if not _loopback_host(self.headers):
+                self._json(403, {"error": "bad host"})
+                return
             if self.path == "/contract":               # the IPC contract
-                self._json(200, CONTRACT)
-            else:                                       # health check
-                self._json(200, {"ok": True})
+                self._json(200, resolved_contract(
+                    load_config(getattr(args, "config", None))))
+            else:                                       # health + identity
+                self._json(200, _daemon_identity())
 
         def do_POST(self):
+            # CSRF / DNS-rebinding guards: reject a non-loopback Host and any
+            # cross-Origin POST. Legit callers (Node fetch to localhost,
+            # Hammerspoon hs.http) send no Origin; a browser page always does.
+            if not _loopback_host(self.headers):
+                self._json(403, {"error": "bad host"})
+                return
+            if self.headers.get("Origin"):
+                self._json(403, {"error": "cross-origin POST refused"})
+                return
             n = int(self.headers.get("Content-Length", 0))
             try:
                 req = json.loads(self.rfile.read(n) or b"{}")
             except Exception:                          # noqa: BLE001
                 req = {}
-            buf = io.StringIO()
+            out_buf, err_buf = io.StringIO(), io.StringIO()
             code = 1
-            with contextlib.redirect_stdout(buf):
-                try:
-                    ns = parser.parse_args(req.get("argv") or [])
-                    code = ns.func(ns)
-                except SystemExit as e:
-                    code = int(e.code or 0)
-                except RuntimeError as e:
-                    sys.stderr.write(f"error: {e}\n")
-                    print_status("error", "runtime")
-                    code = 1
-                except Exception as e:                 # noqa: BLE001
-                    sys.stderr.write(f"alfred: request failed: {e}\n")
-                    code = 1
-            self._json(200, {"code": code, "out": buf.getvalue()})
+            # Serialize the redirect+dispatch so concurrent requests can't cross
+            # each other's captured stdout/stderr (the global-redirect race).
+            with _POST_LOCK:
+                with contextlib.redirect_stdout(out_buf), \
+                        contextlib.redirect_stderr(err_buf):
+                    try:
+                        ns = parser.parse_args(req.get("argv") or [])
+                        code = ns.func(ns)
+                    except SystemExit as e:
+                        code = int(e.code or 0)
+                    except RuntimeError as e:
+                        sys.stderr.write(f"error: {e}\n")
+                        print_status("error", "runtime")
+                        code = 1
+                    except Exception as e:             # noqa: BLE001
+                        sys.stderr.write(f"alfred: request failed: {e}\n")
+                        print_status("error", "runtime")
+                        code = 1
+            err_text = err_buf.getvalue()
+            if err_text:                               # keep it in the daemon log too
+                sys.stderr.write(err_text)
+            self._json(200, {"code": code, "out": out_buf.getvalue(),
+                             "err": err_text})
 
         def log_message(self, *a):
             pass
@@ -1867,14 +2286,26 @@ def cmd_serve(args) -> int:
     try:
         srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     except OSError as e:
-        sys.stderr.write(f"alfred: port {port} busy ({e}); a daemon is already "
-                         "running — exiting.\n")
+        who = _probe_daemon(port)
+        if who and who.get("app") == "alfred":
+            sys.stderr.write(f"alfred: port {port} already served by an Alfred "
+                             f"daemon (pid {who.get('pid')}) — exiting.\n")
+        else:
+            sys.stderr.write(f"alfred: port {port} busy ({e}) and NOT an Alfred "
+                             "daemon; refusing to start. Free the port or set a "
+                             "different one.\n")
         return 0
+    _write_daemon_info(port)
     sys.stderr.write(f"alfred: serving on 127.0.0.1:{port}\n"); sys.stderr.flush()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        try:
+            _daemon_info_path().unlink()
+        except OSError:
+            pass
     return 0
 
 
@@ -1949,6 +2380,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_sp.add_argument("--config")
     p_sp.set_defaults(func=cmd_set_processing)
 
+    p_st = sub.add_parser("set-stt",
+                          help="persist [stt] settings (vocab/initial_prompt, language)")
+    p_st.add_argument("--initial-prompt", dest="initial_prompt",
+                      help="vocabulary/name biasing for the STT model")
+    p_st.add_argument("--language", help="STT language code, or 'auto'")
+    p_st.add_argument("--config")
+    p_st.set_defaults(func=cmd_set_stt)
+
     p_get = sub.add_parser("settings", help="print backend/model settings + lists as JSON")
     p_get.add_argument("--config")
     p_get.set_defaults(func=cmd_settings)
@@ -1970,7 +2409,11 @@ def main(argv=None) -> int:
         return args.func(args)
     except KeyboardInterrupt:
         return 130
-    except RuntimeError as e:
+    except Exception as e:                            # noqa: BLE001
+        # Any failure (RuntimeError, a stray TOMLDecodeError/JSONDecodeError, …)
+        # ends with a VB_STATUS line so the front-end never sees a bare traceback
+        # with no machine-readable status. The contract promise: the LAST line is
+        # always VB_STATUS.
         sys.stderr.write(f"error: {e}\n")
         print_status("error", "runtime")
         return 1

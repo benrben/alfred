@@ -157,7 +157,8 @@ class StreamSessionLifecycle(unittest.TestCase):
         sess = self._session(self.FRAME * 3)
         sess._write()                            # mid-recording snapshot
         live = json.loads(self.stream_path.read_text())
-        self.assertEqual(set(live), {"transcript", "recording", "done", "ts"})
+        self.assertEqual(set(live),
+                         {"transcript", "recording", "done", "ts", "path"})
         self.assertTrue(live["recording"])       # stop not yet set
         self.assertFalse(live["done"])
 
