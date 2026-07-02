@@ -716,7 +716,7 @@ def _run(cmd: list[str], env: dict, timeout: int) -> str:
             capture_output=True, text=True,
             encoding="utf-8", errors="replace",  # decode as UTF-8, not locale
         )
-    except subprocess.TimeoutExpired as e:
+    except subprocess.TimeoutExpired:
         # Speak the one exception type the fallback loop understands, so a hung
         # CLI in `auto` mode falls back to the next backend instead of aborting.
         # Don't embed str(e) — it includes the full command (and thus the prompt).
@@ -1823,6 +1823,7 @@ def cmd_set_intent(args) -> int:
     the prompt it was meant to protect). Existing extra keys (e.g. replace) are
     kept."""
     import re
+
     import tomlkit
     key = (args.key or "").strip()
     if not key or not re.fullmatch(r"[A-Za-z0-9_-]+", key):
@@ -2182,8 +2183,8 @@ def cmd_serve(args) -> int:
     would take; the response is {"code", "out", "err"} (out/err = captured
     stdout/stderr). GET / returns the daemon's identity; GET /contract the
     contract. Host + Origin checks block browser CSRF / DNS-rebinding."""
-    import io
     import contextlib
+    import io
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     global _DAEMON_MODE
@@ -2194,14 +2195,16 @@ def cmd_serve(args) -> int:
     # Warm the model now (mlx-whisper caches it for the life of the process).
     cfg0 = None
     try:
-        import numpy as np
         import mlx_whisper
+        import numpy as np
         cfg0 = load_config(args.config)
-        sys.stderr.write("alfred: warming Whisper model…\n"); sys.stderr.flush()
+        sys.stderr.write("alfred: warming Whisper model…\n")
+        sys.stderr.flush()
         with contextlib.redirect_stdout(sys.stderr):
             mlx_whisper.transcribe(np.zeros(16000, dtype="float32"),
                                    path_or_hf_repo=cfg0["stt"]["model"], verbose=False)
-        sys.stderr.write("alfred: model ready.\n"); sys.stderr.flush()
+        sys.stderr.write("alfred: model ready.\n")
+        sys.stderr.flush()
     except Exception as e:                              # noqa: BLE001
         sys.stderr.write(f"alfred: warm-up skipped ({e}); loads on first request.\n")
 
@@ -2214,7 +2217,8 @@ def cmd_serve(args) -> int:
                 warm = _get_warm(cfg, _clean_env(_CLAUDE_KEY_VARS))
                 if warm is not None:
                     warm.ask("Reply with exactly: ok", 60)
-                    sys.stderr.write("alfred: claude session warm.\n"); sys.stderr.flush()
+                    sys.stderr.write("alfred: claude session warm.\n")
+                    sys.stderr.flush()
         except Exception as e:                          # noqa: BLE001
             sys.stderr.write(f"alfred: claude pre-warm skipped ({e}).\n")
     threading.Thread(target=_prewarm, daemon=True).start()
@@ -2296,7 +2300,8 @@ def cmd_serve(args) -> int:
                              "different one.\n")
         return 0
     _write_daemon_info(port)
-    sys.stderr.write(f"alfred: serving on 127.0.0.1:{port}\n"); sys.stderr.flush()
+    sys.stderr.write(f"alfred: serving on 127.0.0.1:{port}\n")
+    sys.stderr.flush()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

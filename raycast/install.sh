@@ -133,7 +133,11 @@ done
 # persists in Raycast after the watcher exits.
 sleep 2
 kill "$DEV_PID" 2>/dev/null || true
-pkill -f "ray develop" 2>/dev/null || true
+# npm doesn't reliably propagate SIGTERM to its node child, so also target the
+# watcher by THIS extension's path — NOT a blanket `pkill -f "ray develop"`,
+# which would kill a `ray develop` watcher the user is running for any OTHER
+# extension. The real cmdline is `node <DIR>/node_modules/.bin/ray develop`.
+pkill -f "$DIR/node_modules/.bin/ray develop" 2>/dev/null || true
 wait "$DEV_PID" 2>/dev/null || true
 
 if [[ -z "$ok" ]]; then

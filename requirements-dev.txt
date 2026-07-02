@@ -1,0 +1,7 @@
+# Development dependencies (test + lint). Not needed to RUN Alfred.
+# Install:  .venv/bin/pip install -r requirements-dev.txt   (or: make dev)
+#
+# The test suite is stdlib unittest, so `python -m unittest discover -s tests`
+# needs nothing here; pytest just gives nicer output and is what the docs/CI use.
+pytest>=8,<10
+ruff>=0.6

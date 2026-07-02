@@ -155,7 +155,7 @@ $PY voicebridge.py history --copy 0   # re-copy the most recent
 
 Per-run flags override the config: `--translate/--no-translate`, `--rewrite`,
 `--optimize`, `--mode email|message|commit|prompt|notes|raw`, `--backend
-claude|codex`, `--model`, `--language he`, `--paste`, `--stdout`.
+local|auto|claude|codex`, `--model`, `--language he`, `--paste`, `--stdout`.
 
 ## Configure
 
@@ -234,14 +234,47 @@ voicebridge.py          engine / CLI
 voicebridge.lua         Hammerspoon front-end
 raycast/                Raycast extension (second front-end)
 config.example.toml     all settings, documented
-requirements.txt        Python deps
+requirements.txt        Python deps (floating intent)
+constraints.txt         pinned known-good versions (lockfile)
 install.sh              setup + environment check
+Makefile                dev tasks (make test / lint / typecheck)
 ```
 
-## Not yet (easy next steps)
+## Development
 
-Live partial transcripts, push-to-talk (hold) mode, audio pre-trim/VAD, and
-packaging as a standalone `.app`. (A settings GUI and a warm always-on engine,
-once on this list, now ship — see [The Alfred window](#the-alfred-window) and
-[Speed](#speed-warm-engine).) The pipeline is structured as composable stages, so
-adding the rest is incremental.
+The three front-ends carry three test suites (Python engine, Hammerspoon pure
+helpers, Raycast/TS). One entry point runs them all (each is <10s):
+
+```bash
+make dev      # once: install pytest + ruff into the venv
+make test     # run all three suites (Python + Lua + Raycast)
+make lint     # ruff + luacheck + eslint
+```
+
+Or individually: `make test-py`, `make test-lua`, `make test-ts`. CI
+(`.github/workflows/ci.yml`) runs all three on every push/PR — on plain Ubuntu,
+since the suites stub the MLX models (no Apple-Silicon wheels needed).
+
+### Front-end ↔ engine compatibility
+
+The engine publishes a versioned IPC **contract** (`voicebridge.py contract` /
+`GET /contract`) with a `schema_version`. Changes are **additive** within a
+version — a front-end reads the fields it knows and treats missing ones as
+absent, so `git pull` (which updates the engine and the Hammerspoon script
+together) and a not-yet-rebuilt Raycast bundle keep working. A
+backward-incompatible change bumps `schema_version`, and both front-ends warn
+when the engine's major version differs from the one they were built against.
+
+## Not yet
+
+- **Push-to-talk (hold) mode** — small; Hammerspoon-only (Raycast can't see
+  key-up). A top dictation-tool expectation.
+- **Audio pre-trim / VAD** — lower value now that the streaming transcriber
+  already cuts chunks at silences; worth it once streaming is in *both*
+  front-ends.
+- **Standalone `.app` packaging** — a real repackaging effort (everything
+  currently assumes the repo layout + venv), not a quick step.
+
+(Live partial transcripts already ship in the Raycast Dictate view — see
+[Speed](#speed-warm-engine); a settings GUI and warm always-on engine also ship.)
+The pipeline is composable stages, so adding the rest is incremental.

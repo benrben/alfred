@@ -1,0 +1,20 @@
+# Alfred is a script-first project (voicebridge.py runs directly, no packaging),
+# so this file exists only to configure dev tooling — currently ruff.
+# Run: make lint   (or: .venv/bin/ruff check voicebridge.py tests/)
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv", "raycast", "__pycache__"]
+
+[tool.ruff.lint]
+# A pragmatic default set. E/F catch real bugs (undefined names, unused vars);
+# we skip a few whitespace/complexity rules that don't fit a single-file script.
+select = ["E", "F", "W", "I"]
+ignore = [
+  "E501",  # line length is enforced by formatter conventions, not hard-failed
+  "E741",  # ambiguous var names (l/O/I) — used deliberately in a few list comps
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]  # tests sys.path.insert before importing voicebridge

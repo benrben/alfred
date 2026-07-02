@@ -37,7 +37,9 @@ echo "Creating virtual environment in .venv ..."
 source .venv/bin/activate
 python -m pip install --upgrade pip >/dev/null
 echo "Installing dependencies (this downloads MLX; may take a minute) ..."
-pip install -r requirements.txt
+# -c constraints.txt pins the known-good versions (a lockfile) so a fresh
+# install matches the tested machine; requirements.txt keeps the floating intent.
+pip install -r requirements.txt -c constraints.txt
 
 # --- 4. sox (recorder) -----------------------------------------------------
 if command -v sox >/dev/null 2>&1; then

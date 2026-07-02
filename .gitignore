@@ -8,6 +8,11 @@ __pycache__/
 config.toml
 *.bak
 
+# Test / tool caches (don't depend on a tool's courtesy self-ignore file)
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
 # macOS
 .DS_Store
-.coverage

@@ -1,0 +1,58 @@
+name: CI
+
+# The three suites were deliberately built to run without a model or Apple
+# Silicon: voicebridge.py lazy-imports mlx_* inside functions and the tests stub
+# them, so the Python job needs only numpy/soundfile/tomlkit — no mlx wheels — and
+# runs on plain Ubuntu. Lua needs only a lua binary; Raycast only Node.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: System deps (libsndfile for soundfile)
+        run: sudo apt-get update && sudo apt-get install -y libsndfile1
+      - name: Install test deps (no mlx — the suite stubs it)
+        run: python -m pip install --upgrade pip numpy soundfile tomlkit pytest ruff
+      - name: Lint (ruff)
+        run: ruff check voicebridge.py tests/
+      - name: Test
+        run: python -m pytest tests/ -q
+
+  lua:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install lua + luacheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4 luarocks
+          sudo luarocks install luacheck || true
+      - name: Lint (luacheck, non-blocking)
+        run: luacheck voicebridge.lua tests/lua/ || true
+      - name: Test (plain lua)
+        run: VB_LUA_TEST=1 lua5.4 tests/lua/test_helpers.lua
+
+  raycast:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: raycast
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: raycast/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npx --no-install vitest run

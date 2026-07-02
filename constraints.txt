@@ -1,0 +1,19 @@
+# Known-good pinned versions (a lockfile) for a reproducible install.
+#
+# requirements.txt keeps floating >= specs as INTENT; this file pins the exact
+# versions the project is developed and tested against, so a fresh install
+# matches the maintainer's machine. mlx-* release frequently and have broken
+# APIs across minor versions, and numpy>=1.24 otherwise permits the 1.x->2.x break.
+#
+# Used by install.sh:  pip install -r requirements.txt -c constraints.txt
+# Refresh after an intentional upgrade:  .venv/bin/pip freeze | grep ... > constraints.txt
+mlx==0.31.2
+mlx-lm==0.31.3
+mlx-whisper==0.4.3
+numba==0.65.1
+numpy==2.4.6
+safetensors==0.8.0
+scipy==1.18.0
+soundfile==0.14.0
+tokenizers==0.22.2
+tomlkit==0.15.0

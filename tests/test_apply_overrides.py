@@ -35,7 +35,8 @@ class ApplyOverrides(unittest.TestCase):
 
     def test_translate_tristate(self):
         # None leaves config; False overrides a config True; True sets it on.
-        cfg = self._cfg(); cfg["processing"]["translate"] = True
+        cfg = self._cfg()
+        cfg["processing"]["translate"] = True
         vb._apply_overrides(cfg, _ns(translate=None))
         self.assertTrue(cfg["processing"]["translate"])
         vb._apply_overrides(cfg, _ns(translate=False))

@@ -248,7 +248,6 @@ class CmdStreamLive(unittest.TestCase):
         vb._ACTIVE_STREAM = None
 
     def _fake_session(self, text="streamed", lang="he", raise_on_finish=False):
-        audio = self.audio
         outer = self
 
         class FakeSession:
@@ -338,7 +337,7 @@ class CmdTextRouting(unittest.TestCase):
         old = sys.stdin
         sys.stdin = io.StringIO("piped in")
         try:
-            with _Capture() as cap:
+            with _Capture():
                 rc = vb.cmd_text(_ns(text="-", instruction=None))
         finally:
             sys.stdin = old
