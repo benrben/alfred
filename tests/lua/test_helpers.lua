@@ -277,10 +277,13 @@ do
     for _, it in ipairs(m) do if it.title == "Backend" then return it.menu end end
   end
   local sub = backendSub(menu)
-  check(sub ~= nil and #sub == 4, "backend submenu has 4 entries")
+  -- Default + the 4 real backends (auto/claude/codex/local). "local" is the
+  -- engine's DEFAULT backend and used to be missing from BOTH UI lists.
+  check(sub ~= nil and #sub == 5, "backend submenu has Default + 4 backends")
   eq(sub[1].title, "Default (config)", "backend[1] is Default")
   eq(sub[1].checked, true, "backend nil -> Default checked")
   eq(sub[2].checked, false, "backend nil -> auto unchecked")
+  eq(sub[#sub].title, "local", "backend submenu includes 'local' (drift bug fixed)")
 
   -- With backend='claude', the header shows it and the claude radio is checked.
   local m2 = H.buildMenu("recording", "claude", {})
@@ -311,6 +314,201 @@ do
   itemByTitle(m4, "Cancel recording").fn()
   eq(hits.dictate, true, "Dictate item wired to toggleDictate")
   eq(hits.cancel, true, "Cancel item wired to cancel")
+end
+
+-- =====================================================================
+-- BACKENDS (hs-hotkey-menubar / hs-app-window): the single backend list that
+-- feeds both the menubar submenu and the window <select>. Must include "local".
+-- =====================================================================
+do
+  check(type(H.BACKENDS) == "table", "BACKENDS is a table")
+  local has = {}
+  for _, b in ipairs(H.BACKENDS) do has[b] = true end
+  check(has["auto"], "BACKENDS has auto")
+  check(has["claude"], "BACKENDS has claude")
+  check(has["codex"], "BACKENDS has codex")
+  check(has["local"], "BACKENDS has local (the engine's default backend)")
+end
+
+-- =====================================================================
+-- resultBanner (engine-result): the "copied" banner, raw vs polished.
+-- =====================================================================
+do
+  eq(H.resultBanner(false), "Copied to clipboard ✓", "resultBanner(ok)")
+  eq(H.resultBanner(true), "Copied raw transcript (LLM step failed)", "resultBanner(llmFailed)")
+end
+
+-- =====================================================================
+-- errorMessage (engine-result): subtype -> human message, with an optional
+-- stderr tail appended in parens; unknown subtype -> generic fallback.
+-- =====================================================================
+do
+  eq(H.errorMessage("audio_not_found", nil), "No audio to transcribe.", "errorMessage(audio_not_found)")
+  eq(H.errorMessage("stt_failed", nil), "Transcription failed.", "errorMessage(stt_failed)")
+  eq(H.errorMessage("llm_failed", nil), "The rewrite step failed.", "errorMessage(llm_failed)")
+  eq(H.errorMessage("runtime", nil), "The engine hit an error.", "errorMessage(runtime)")
+  eq(H.errorMessage("weird_new_kind", nil), "Something went wrong.", "errorMessage(unknown) -> generic")
+  eq(H.errorMessage("runtime", "boom: nope"), "The engine hit an error. (boom: nope)",
+     "errorMessage appends the stderr tail")
+  eq(H.errorMessage("runtime", ""), "The engine hit an error.", "errorMessage ignores an empty tail")
+end
+
+-- =====================================================================
+-- resultPayload (engine-result): pull the still-ENCODED VB_RESULT payload from
+-- stdout (the line BEFORE VB_STATUS), or nil when the engine emitted none.
+-- =====================================================================
+do
+  eq(H.resultPayload(nil), nil, "resultPayload(nil) -> nil")
+  eq(H.resultPayload(""), nil, "resultPayload(empty) -> nil")
+  eq(H.resultPayload("VB_STATUS\tcopied"), nil, "resultPayload with no result line -> nil")
+  eq(H.resultPayload('VB_RESULT\t"hi"\nVB_STATUS\tcopied'), '"hi"',
+     "resultPayload returns the encoded payload (still JSON)")
+  -- Found even amid other stderr/stdout noise.
+  eq(H.resultPayload('note: blah\nVB_RESULT\t"x"\nVB_STATUS\tcopied'), '"x"',
+     "resultPayload found amid other lines")
+end
+
+-- =====================================================================
+-- classifyResult (engine-result): the whole finished-run classification, hs-free
+-- via an injected json decoder. `decode` here just strips the surrounding quotes
+-- of the simple test payloads (a stand-in for hs.json.decode).
+-- =====================================================================
+do
+  local decode = function(s)
+    if type(s) ~= "string" then error("not a string") end
+    return (s:gsub('^"', ''):gsub('"$', ''))    -- naive de-quote for the fixtures
+  end
+
+  -- Plain copied: text comes from VB_RESULT (preferred over the clipboard).
+  local c = H.classifyResult(0, 'VB_RESULT\t"hello world"\nVB_STATUS\tcopied', "", decode)
+  eq(c.kind, "copied", "classify copied kind")
+  eq(c.text, "hello world", "classify copied text from VB_RESULT")
+  eq(c.llmFailed, false, "classify copied not llmFailed")
+  eq(c.pasteFailed, false, "classify copied not pasteFailed")
+  eq(c.path, nil, "classify copied has no path")
+  eq(c.subtype, nil, "classify copied has no subtype")
+
+  -- No VB_RESULT line -> text nil (caller falls back to the clipboard).
+  local c2 = H.classifyResult(0, "VB_STATUS\tcopied", "", decode)
+  eq(c2.kind, "copied", "classify copied (no result line) kind")
+  eq(c2.text, nil, "no VB_RESULT -> text nil (clipboard fallback)")
+
+  -- llm_failed suffix: raw transcript delivered.
+  local c3 = H.classifyResult(0, 'VB_RESULT\t"raw"\nVB_STATUS\tcopied\tllm_failed', "", decode)
+  eq(c3.kind, "copied", "classify llm_failed kind is copied")
+  eq(c3.llmFailed, true, "classify detects llm_failed suffix")
+  eq(c3.text, "raw", "classify llm_failed still has the raw text")
+
+  -- paste_failed suffix (and combined with llm_failed, order: paste then llm).
+  local c4 = H.classifyResult(0, "VB_STATUS\tcopied\tpaste_failed", "", decode)
+  eq(c4.pasteFailed, true, "classify detects paste_failed suffix")
+  eq(c4.llmFailed, false, "paste_failed alone is not llmFailed")
+  local c5 = H.classifyResult(0, "VB_STATUS\tcopied\tpaste_failed\tllm_failed", "", decode)
+  eq(c5.pasteFailed, true, "classify detects paste_failed with llm_failed")
+  eq(c5.llmFailed, true, "classify detects llm_failed as the last suffix")
+
+  -- saved: path in parts[2].
+  local c6 = H.classifyResult(0, "VB_STATUS\tsaved\t/tmp/out.md", "", decode)
+  eq(c6.kind, "saved", "classify saved kind")
+  eq(c6.path, "/tmp/out.md", "classify saved path")
+
+  -- empty.
+  eq(H.classifyResult(0, "VB_STATUS\tempty", "", decode).kind, "empty", "classify empty kind")
+
+  -- error: subtype in parts[2]; tail is the last non-blank stderr line.
+  local c7 = H.classifyResult(1, "VB_STATUS\terror\tstt_failed",
+    "some noise\nerror: transcription failed: boom\n", decode)
+  eq(c7.kind, "error", "classify error kind")
+  eq(c7.subtype, "stt_failed", "classify error subtype")
+  eq(c7.tail, "error: transcription failed: boom", "classify error tail = last stderr line")
+
+  -- No status line at all -> kind nil, tail still surfaced from stderr.
+  local c8 = H.classifyResult(1, "just a traceback", "Traceback...\nValueError: x", decode)
+  eq(c8.kind, nil, "classify no-status kind nil")
+  eq(c8.tail, "ValueError: x", "classify no-status still exposes the stderr tail")
+end
+
+-- =====================================================================
+-- classifyPost (engine-client): interpret an hs.http POST outcome. Only a
+-- genuine connection-refused (-1004) is "down" (safe to one-shot re-run); the
+-- ~60s timeout and everything else is "busy" (do NOT re-run -> no double write).
+-- =====================================================================
+do
+  eq(H.classifyPost(200, true), "ok", "200 + body -> ok")
+  eq(H.classifyPost(200, false), "busy", "200 without a body -> busy (don't re-run)")
+  eq(H.classifyPost(-1004, false), "down", "connection refused (-1004) -> down")
+  eq(H.classifyPost(-1001, false), "busy", "timeout (-1001) -> busy (the double-run bug)")
+  eq(H.classifyPost(-1005, false), "busy", "mid-flight reset (-1005) -> busy (engine owns the job)")
+  eq(H.classifyPost(500, false), "busy", "5xx -> busy")
+end
+
+-- =====================================================================
+-- buildEngineArgv (engine-client): base subcommand + per-capture flags +
+-- optional backend override, in order.
+-- =====================================================================
+do
+  local a = H.buildEngineArgv({ "process", "/x.wav" }, nil, nil)
+  eq(#a, 2, "buildEngineArgv base only")
+  eq(a[1], "process", "argv[1]")
+  eq(a[2], "/x.wav", "argv[2]")
+
+  local b = H.buildEngineArgv({ "text", "hi" }, { "--mode", "email", "--rewrite" }, "claude")
+  eq(#b, 7, "buildEngineArgv base(2) + flags(3) + --backend + value")
+  eq(b[1], "text", "base subcommand still first")
+  eq(b[3], "--mode", "flags appended after base")
+  eq(b[4], "email", "flag value preserved")
+  eq(b[5], "--rewrite", "rewrite flag preserved")
+  eq(b[6], "--backend", "backend flag name precedes value")
+  eq(b[7], "claude", "backend value appended last")
+  -- backend flag name precedes the value.
+  local c = H.buildEngineArgv({ "process", "/x.wav" }, {}, "codex")
+  eq(c[3], "--backend", "backend adds --backend")
+  eq(c[4], "codex", "backend value follows --backend")
+  -- nil backend adds nothing.
+  eq(#H.buildEngineArgv({ "process", "/x.wav" }, {}, nil), 2, "nil backend adds nothing")
+end
+
+-- =====================================================================
+-- parseHistory (hs-app-window): newest-first records from JSONL lines via an
+-- injected decoder; honours the limit window and skips undecodable lines.
+-- =====================================================================
+do
+  -- Decoder stand-in: a line "bad" throws; "empty" decodes without text; others
+  -- become {text=line, ts="T"..line, chars=#line}.
+  local decode = function(l)
+    if l == "bad" then error("boom") end
+    if l == "notext" then return { ts = "T", chars = 0 } end
+    return { text = l, ts = "T" .. l, chars = #l }
+  end
+
+  local lines = { "a", "b", "c", "d" }
+  local items = H.parseHistory(lines, 30, decode)
+  eq(#items, 4, "parseHistory returns all within limit")
+  eq(items[1].text, "d", "parseHistory is newest-first (last line first)")
+  eq(items[2].text, "c", "parseHistory order [2]")
+  eq(items[1].ts, "Td", "parseHistory carries ts")
+  eq(items[1].chars, 1, "parseHistory carries chars")
+
+  -- Limit window: only the most recent N.
+  local two = H.parseHistory({ "a", "b", "c", "d" }, 2, decode)
+  eq(#two, 2, "parseHistory honours the limit")
+  eq(two[1].text, "d", "parseHistory limit keeps the newest")
+  eq(two[2].text, "c", "parseHistory limit second newest")
+
+  -- Undecodable + text-less lines are skipped, the rest survive.
+  local mixed = H.parseHistory({ "x", "bad", "notext", "y" }, 30, decode)
+  eq(#mixed, 2, "parseHistory skips bad + text-less lines")
+  eq(mixed[1].text, "y", "parseHistory skip: newest good first")
+  eq(mixed[2].text, "x", "parseHistory skip: older good second")
+
+  -- Empty / nil input.
+  eq(#H.parseHistory({}, 30, decode), 0, "parseHistory empty -> {}")
+  eq(#H.parseHistory(nil, 30, decode), 0, "parseHistory nil -> {}")
+
+  -- chars falls back to #text when the record omits it.
+  local nochars = H.parseHistory({ "hello" }, 30, function(l) return { text = l } end)
+  eq(nochars[1].chars, 5, "parseHistory chars falls back to #text")
+  eq(nochars[1].ts, "", "parseHistory ts falls back to ''")
 end
 
 -- ---- summary -------------------------------------------------------------

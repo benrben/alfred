@@ -54,6 +54,12 @@ _G.voicebridge = VB
 
 local ICONS = { idle = "🎙️", recording = "🔴", processing = "⏳" }
 
+-- The selectable LLM backends (besides "Default = use config"). ONE source
+-- feeding both the menubar submenu and the window's <select>; "local" is the
+-- on-device MLX model — and the engine's DEFAULT — which the earlier hard-coded
+-- lists both dropped. Matches voicebridge.py's `--backend` choices.
+local BACKENDS = { "auto", "claude", "codex", "local" }
+
 -- Pure: the menubar glyph for a state, falling back to the idle mic.
 local function iconForState(s) return ICONS[s] or ICONS.idle end
 
@@ -121,7 +127,22 @@ USER_PATH = USER_PATH .. ":/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/
 -- mangles curly quotes / em dashes / Hebrew) when launched from the GUI.
 local TASK_ENV  = { PATH = USER_PATH, HOME = HOME,
                     LANG = "en_US.UTF-8", LC_ALL = "en_US.UTF-8", PYTHONUTF8 = "1" }
+-- DAEMON_PORT / DAEMON_URL default to the literals above; applyContract() may
+-- rewrite them from the engine's contract at load (so the port lives in one
+-- place, the engine's CONTRACT).
 local DAEMON_URL = "http://127.0.0.1:" .. DAEMON_PORT .. "/"
+
+-- Shared shell env prefix for every synchronous hs.execute() that shells the
+-- engine (startDaemon / the contract fetch): the same PATH/HOME/UTF-8 locale as
+-- TASK_ENV, so a GUI-launched engine behaves exactly like the CLI one.
+local ENV_PREFIX = "PATH='" .. USER_PATH .. "' HOME='" .. HOME ..
+  "' LANG='en_US.UTF-8' LC_ALL='en_US.UTF-8' PYTHONUTF8=1 "
+-- The engine's owner-only (0700) state dir. Our debug trace + last-capture dump
+-- live here — NOT in world-readable /tmp — because they can contain verbatim
+-- dictation. Created on demand by ensureVBDir(); the engine also creates it.
+local VB_DIR    = HOME .. "/.voicebridge"
+local LOG_FILE  = VB_DIR .. "/voicebridge.log"
+local DUMP_FILE = VB_DIR .. "/voicebridge_last.txt"
 
 pcall(require, "hs.ipc")   -- enables the `hs` CLI for introspection
 
@@ -144,10 +165,25 @@ function fmtTime(secs)
   return string.format("%02d:%02d", math.floor(secs / 60), secs % 60)
 end
 
-local DEBUG = true   -- writes a trace to /tmp/voicebridge.log; set false to silence
+-- Ensure the owner-only ~/.voicebridge dir exists before we write into it (the
+-- engine creates it 0700 too; we chmod best-effort in case we win the race).
+local vbDirReady = false
+local function ensureVBDir()
+  if vbDirReady then return end
+  if not hs.fs.attributes(VB_DIR) then
+    hs.fs.mkdir(VB_DIR)
+    pcall(function() hs.fs.chmod(VB_DIR, 448) end)   -- 0700; no-op if unsupported
+  end
+  vbDirReady = true
+end
+
+-- Off by default: the trace can contain dictation excerpts. Set true to write a
+-- trace to ~/.voicebridge/voicebridge.log (owner-only), not world-readable /tmp.
+local DEBUG = false
 function dbg(msg)
   if not DEBUG then return end
-  local fh = io.open("/tmp/voicebridge.log", "a")
+  ensureVBDir()
+  local fh = io.open(LOG_FILE, "a")
   if fh then fh:write(os.date("%H:%M:%S ") .. tostring(msg) .. "\n"); fh:close() end
 end
 
@@ -173,6 +209,14 @@ end
 function tmpWav()
   local tmp = os.getenv("TMPDIR") or "/tmp/"
   return tmp .. "voicebridge_" .. os.time() .. ".wav"
+end
+
+-- Paste `text` into the frontmost app: put it on the clipboard, then (after a
+-- short delay so focus settles) synthesize Cmd-V. Shared by the toast panel and
+-- the app window so the sequence lives in exactly one place.
+local function pasteText(text, delay)
+  hs.pasteboard.setContents(text or "")
+  hs.timer.doAfter(delay or 0.08, function() hs.eventtap.keyStroke({ "cmd" }, "v") end)
 end
 
 -- ---- Recording HUD (floating canvas) -------------------------------------
@@ -282,53 +326,161 @@ end
 
 -- ---- Engine plumbing -----------------------------------------------------
 
--- Parse the engine's machine-readable last line: "VB_STATUS\tkind[\textra...]"
+-- The status-line grammar: sentinel, field separator, and the suffix literals.
+-- Defaults mirror voicebridge.py's CONTRACT; applyContract() overrides them from
+-- the live engine at load so the two can't silently drift. Read at CALL time by
+-- parseStatus/classifyResult, so the load-time override takes effect everywhere.
+local STATUS_SENTINEL = "VB_STATUS"
+local STATUS_SEP      = "\t"
+local RESULT_SENTINEL = "VB_RESULT"
+local LLM_FAILED      = "llm_failed"
+local PASTE_FAILED    = "paste_failed"
+
+-- Parse the engine's machine-readable status line into its tab-separated parts:
+-- "VB_STATUS\tkind[\textra...]" -> { kind, extra... }; nil when none is present.
 function parseStatus(out)
   for line in (out or ""):gmatch("[^\r\n]+") do
-    local rest = line:match("^VB_STATUS\t(.+)$")
+    local rest = line:match("^" .. STATUS_SENTINEL .. STATUS_SEP .. "(.+)$")
     if rest then
       local parts = {}
-      for p in (rest .. "\t"):gmatch("(.-)\t") do parts[#parts + 1] = p end
+      for p in (rest .. STATUS_SEP):gmatch("(.-)" .. STATUS_SEP) do parts[#parts + 1] = p end
       return parts
     end
   end
   return nil
 end
 
+-- Pure: pull the JSON-encoded VB_RESULT payload (the text the engine actually
+-- delivered) from stdout, still ENCODED. json.dumps escapes newlines, so it is
+-- always a single physical line. Returns nil when the engine emitted no result
+-- line (older engine / the --stdout path) — the caller then falls back to the
+-- clipboard. The caller json-decodes (decoder injected to stay hs-free / testable).
+local function resultPayload(out)
+  for line in (out or ""):gmatch("[^\r\n]+") do
+    local enc = line:match("^" .. RESULT_SENTINEL .. STATUS_SEP .. "(.+)$")
+    if enc then return enc end
+  end
+  return nil
+end
+
+-- Pure: map an engine error subtype (+ optional stderr tail) to a human message.
+local ERROR_MESSAGES = {
+  audio_not_found = "No audio to transcribe.",
+  stt_failed      = "Transcription failed.",
+  llm_failed      = "The rewrite step failed.",
+  runtime         = "The engine hit an error.",
+}
+local function errorMessage(subtype, tail)
+  local base = ERROR_MESSAGES[subtype] or "Something went wrong."
+  if tail and #tail > 0 then return base .. " (" .. tail .. ")" end
+  return base
+end
+
+-- Pure: the "copied" banner text, reused by the toast panel, the window's
+-- notify fallback, and the plain notification (was duplicated 3× with drift).
+local function resultBanner(llmFailed)
+  return llmFailed and "Copied raw transcript (LLM step failed)"
+                   or  "Copied to clipboard ✓"
+end
+
+-- Pure: classify a finished engine run into everything the UI needs, hs-free so
+-- it is unit-testable. `decode` json-decodes the VB_RESULT payload (nil when the
+-- caller has no decoder or the engine emitted no result line -> fall back to the
+-- clipboard). Fields:
+--   kind        — VB_STATUS kind (copied/saved/empty/error/streaming) or nil
+--   path        — the saved-file path (kind == "saved")
+--   subtype     — the error subtype (kind == "error"): audio_not_found/…/runtime
+--   llmFailed   — LLM step failed but the raw transcript was still delivered
+--   pasteFailed — auto-paste couldn't be delivered (missing Accessibility)
+--   tail        — last non-blank line of stderr (the real error detail)
+--   text        — the delivered text from VB_RESULT (nil when absent)
+local function classifyResult(code, out, err, decode)
+  local parts = parseStatus(out) or {}
+  local kind = parts[1]
+  local pasteFailed = false
+  for _, p in ipairs(parts) do if p == PASTE_FAILED then pasteFailed = true end end
+  local text
+  local enc = resultPayload(out)
+  if enc and decode then
+    local ok, dec = pcall(decode, enc)
+    if ok and type(dec) == "string" then text = dec end
+  end
+  return {
+    kind = kind,
+    path = (kind == "saved") and parts[2] or nil,
+    subtype = (kind == "error") and parts[2] or nil,
+    llmFailed = parts[#parts] == LLM_FAILED,
+    pasteFailed = pasteFailed,
+    tail = (err or ""):gsub("%s+$", ""):match("[^\r\n]+$"),
+    text = text,
+  }
+end
+
+-- Processing watchdog: if a run neither delivers nor connection-fails within the
+-- bound (a wedged engine / a lost callback), terminate any one-shot task and
+-- reset to idle so the UI can't get stuck on ⏳ forever. Tied to VB.runId so a
+-- newer capture's watchdog supersedes an older one.
+local function cancelWatchdog()
+  if VB.watchdog then VB.watchdog:stop(); VB.watchdog = nil end
+end
+local function startWatchdog(runId)
+  cancelWatchdog()
+  VB.watchdog = hs.timer.doAfter(150, function()
+    VB.watchdog = nil
+    if VB.state == "processing" and VB.runId == runId then
+      if VB.engineTask then pcall(function() VB.engineTask:terminate() end); VB.engineTask = nil end
+      setState("idle")
+      notify("Alfred", "Timed out waiting for the engine.")
+    end
+  end)
+end
+
+-- Thin shell over classifyResult: dispatch the finished run to the UI. `err` is
+-- the daemon's captured stderr (the actual failure detail); we prefer the exact
+-- delivered text from VB_RESULT and only read the clipboard as a fallback.
 function onResult(code, out, err)
+  cancelWatchdog()
   setState("idle")
   VB.engineTask = nil   -- release the retained task now that it has finished
-  local fh = io.open("/tmp/voicebridge_last.txt", "w")
-  if fh then
-    fh:write("code=" .. tostring(code) .. "\n--- STDOUT ---\n" .. (out or "") ..
-             "\n--- STDERR ---\n" .. (err or ""))
-    fh:close()
+  if DEBUG then         -- verbatim capture dump: owner-only + opt-in only
+    ensureVBDir()
+    local fh = io.open(DUMP_FILE, "w")
+    if fh then
+      fh:write("code=" .. tostring(code) .. "\n--- STDOUT ---\n" .. (out or "") ..
+               "\n--- STDERR ---\n" .. (err or ""))
+      fh:close()
+    end
   end
-  dbg("onResult code=" .. tostring(code) ..
-      " out=[" .. ((out or ""):gsub("\n", "\\n")):sub(1, 200) .. "]" ..
-      " err=[" .. ((err or ""):gsub("\n", "\\n")):sub(1, 200) .. "]")
-  local parts = parseStatus(out)
-  local kind = parts and parts[1] or nil
-  local llmFailed = parts and parts[#parts] == "llm_failed"
-  dbg("onResult kind=" .. tostring(kind))
+  local r = classifyResult(code, out, err, hs.json.decode)
+  dbg("onResult code=" .. tostring(code) .. " kind=" .. tostring(r.kind) ..
+      " sub=" .. tostring(r.subtype) .. " err=[" ..
+      ((err or ""):gsub("\n", "\\n")):sub(1, 200) .. "]")
 
-  if kind == "copied" then
-    local txt = hs.pasteboard.getContents() or ""
-    local ok, e = pcall(updateResult, txt, llmFailed)
+  if r.kind == "copied" then
+    -- Prefer the engine's exact delivered text (VB_RESULT); the clipboard is a
+    -- fallback for older engines that don't emit the result line.
+    local txt = r.text or hs.pasteboard.getContents() or ""
+    local ok, e = pcall(updateResult, txt, r.llmFailed)
     if not ok then
       dbg("updateResult ERROR: " .. tostring(e))
-      notify("Alfred", llmFailed and "Copied raw transcript (LLM step failed)"
-                                        or "Copied to clipboard ✓")
+      notify("Alfred", resultBanner(r.llmFailed))
     end
-  elseif kind == "saved" then
-    local path = parts[2]
+    if r.pasteFailed then
+      notify("Alfred", "Auto-paste failed — granted Accessibility to Hammerspoon?")
+    end
+  elseif r.kind == "saved" then
+    local path = r.path
     notify("Alfred", "Too long — saved to file (click to reveal)",
       function() if path then hs.execute("open -R '" .. path .. "'") end end)
-  elseif kind == "empty" then
+  elseif r.kind == "empty" then
     notify("Alfred", "No speech detected.")
+  elseif r.kind == "error" then
+    notify("Alfred", errorMessage(r.subtype, r.tail))
   else
-    local tail = (err or ""):gsub("%s+$", ""):match("[^\r\n]+$") or "see Hammerspoon console"
-    notify("Alfred", "Error: " .. tail)
+    -- No VB_STATUS line at all (a crash before the sentinel, or a foreign
+    -- response): surface whatever stderr detail we have.
+    notify("Alfred", "Error: " .. (r.tail or
+      "see the engine log (~/.voicebridge or /tmp/alfred_daemon.log)"))
   end
 end
 
@@ -336,10 +488,8 @@ end
 -- (keeping the Whisper model resident). Re-launching when one already runs is
 -- harmless: the new process finds the port busy and exits.
 function startDaemon()
-  hs.execute("PATH='" .. USER_PATH .. "' HOME='" .. HOME ..
-    "' LANG='en_US.UTF-8' LC_ALL='en_US.UTF-8' PYTHONUTF8=1 nohup '" .. PYTHON ..
-    "' '" .. SCRIPT .. "' serve --port " .. DAEMON_PORT ..
-    " >/tmp/alfred_daemon.log 2>&1 &")
+  hs.execute(ENV_PREFIX .. "nohup '" .. PYTHON .. "' '" .. SCRIPT ..
+    "' serve --port " .. DAEMON_PORT .. " >/tmp/alfred_daemon.log 2>&1 &")
   dbg("startDaemon: launched detached on :" .. DAEMON_PORT)
 end
 
@@ -362,35 +512,77 @@ function runEngineOneShot(cmd)
   VB.engineTask = hs.task.new(PYTHON, onResult, full)   -- keep referenced (no GC kill)
   VB.engineTask:setEnvironment(TASK_ENV)
   if not VB.engineTask:start() then
+    cancelWatchdog()
     setState("idle")
     notify("Alfred", "Could not launch the engine. Check PYTHON path in voicebridge.lua")
   end
 end
 
+-- Pure: assemble the engine argv from the base subcommand, the per-capture flags,
+-- and the active backend. (python/script are prepended by the caller.)
+local function buildEngineArgv(argv, captureFlags, backend)
+  local cmd = {}
+  for _, a in ipairs(argv or {}) do cmd[#cmd + 1] = a end
+  for _, a in ipairs(captureFlags or {}) do cmd[#cmd + 1] = a end
+  if backend then cmd[#cmd + 1] = "--backend"; cmd[#cmd + 1] = backend end
+  return cmd
+end
+
+-- Pure: interpret an hs.http POST outcome to the daemon.
+--   "ok"   — 200 with a body: decode + dispatch the result.
+--   "down" — the daemon isn't listening (connection refused, -1004): the request
+--            never reached the engine, so re-running it as a one-shot is safe.
+--   "busy" — anything else, notably the ~60s asyncPost TIMEOUT while a long job
+--            keeps working. Re-running would double-write history/clipboard, so
+--            we must NOT: keep 'processing' and let the watchdog bound it.
+-- Only a genuine connection-refused counts as "down"; a mid-flight reset/timeout
+-- means the engine already owns the job.
+local DAEMON_DOWN_STATUS = { [-1004] = true }
+local function classifyPost(status, hasBody)
+  if status == 200 and hasBody then return "ok" end
+  if DAEMON_DOWN_STATUS[status] then return "down" end
+  return "busy"
+end
+
 -- `argv` starts at the subcommand (e.g. {"process", wav}); no python/script.
 function runEngine(argv)
   setState("processing")
-  local cmd = {}
-  for _, a in ipairs(argv) do cmd[#cmd + 1] = a end
-  for _, a in ipairs(VB.captureFlags or {}) do cmd[#cmd + 1] = a end
+  local cmd = buildEngineArgv(argv, VB.captureFlags, VB.backend)
   VB.captureFlags = nil
-  if VB.backend then cmd[#cmd + 1] = "--backend"; cmd[#cmd + 1] = VB.backend end
-  dbg("runEngine: " .. table.concat(cmd, " "))
-  -- Prefer the warm daemon; fall back to a one-shot process if it's not up.
+  VB.runId = (VB.runId or 0) + 1     -- a late/duplicate result for an older run
+  local myRun = VB.runId            -- is ignored (stale) by the closure below
+  startWatchdog(myRun)
+  dbg("runEngine[" .. myRun .. "]: " .. table.concat(cmd, " "))
+  -- Prefer the warm daemon; fall back to a one-shot process ONLY when it is DOWN
+  -- (see classifyPost): a >60s job would otherwise time the POST out at ~60s and
+  -- get re-run, double-writing history/clipboard.
   hs.http.asyncPost(DAEMON_URL, hs.json.encode({ argv = cmd }),
     { ["Content-Type"] = "application/json" },
     function(status, body)
-      if status == 200 and body then
+      if myRun ~= VB.runId then
+        dbg("runEngine[" .. myRun .. "]: stale result (cur=" .. tostring(VB.runId) .. ") — dropped")
+        return
+      end
+      local outcome = classifyPost(status, body ~= nil and #body > 0)
+      if outcome == "ok" then
         local ok, resp = pcall(hs.json.decode, body)
         if ok and type(resp) == "table" then
           dbg("daemon result code=" .. tostring(resp.code))
-          onResult(resp.code or 0, resp.out or "", "")
+          onResult(resp.code or 0, resp.out or "", resp.err or "")   -- thread err
           return
         end
+        -- 200 but unreadable: don't re-run (the engine may have done the work).
+        cancelWatchdog(); setState("idle")
+        dbg("daemon 200 but undecodable body")
+        notify("Alfred", "The engine returned an unreadable response.")
+      elseif outcome == "down" then
+        dbg("daemon down (status=" .. tostring(status) .. ") -> one-shot")
+        runEngineOneShot(cmd)   -- watchdog stays armed to bound the one-shot
+        ensureDaemon()          -- bring it up for next time
+      else                      -- "busy": the daemon is still working (POST timeout)
+        dbg("daemon busy (status=" .. tostring(status) .. ") -> keep processing, no re-run")
+        notify("Alfred", "Still transcribing… the engine is taking a while.")
       end
-      dbg("daemon unavailable (status=" .. tostring(status) .. ") -> one-shot")
-      runEngineOneShot(cmd)
-      ensureDaemon()   -- bring it up for next time
     end)
 end
 
@@ -406,9 +598,8 @@ function resultPanelHandlers()
       hs.alert.show("Copied ✓", 0.6)
     end,
     onPaste = function(text)
-      hs.pasteboard.setContents(text)
       closeResult()
-      hs.timer.doAfter(0.08, function() hs.eventtap.keyStroke({ "cmd" }, "v") end)
+      pasteText(text)
     end,
     onEmail = function(text)
       closeResult()
@@ -441,22 +632,55 @@ function refreshModes()
   t:start()
 end
 
--- Ask the engine where its config lives instead of hard-coding the path. The
--- `contract` command emits JSON including `config_search` (the ordered list of
--- paths the engine actually consults); we open the first one. Only if the
--- contract call is unavailable do we fall back to the previous literal path.
-function resolveConfigPath()
-  local out = hs.execute("HOME='" .. HOME .. "' LANG='en_US.UTF-8' LC_ALL='en_US.UTF-8'" ..
-    " PYTHONUTF8=1 PATH='" .. USER_PATH .. "' '" .. PYTHON .. "' '" .. SCRIPT .. "' contract 2>/dev/null")
+-- Fetch + decode the engine's CONTRACT once (fast: heavy libs are lazy-imported,
+-- so `contract` just prints JSON). Returns the decoded table or nil. Cached in
+-- VB.contract at load; applyContract() derives our port/paths/sentinels from it
+-- so the front-end can't silently drift from the engine.
+local function fetchContract()
+  local out = hs.execute(ENV_PREFIX .. "'" .. PYTHON .. "' '" .. SCRIPT ..
+    "' contract 2>/dev/null")
   if out and #out > 0 then
     local ok, c = pcall(hs.json.decode, out)
-    if ok and type(c) == "table" and type(c.config_search) == "table"
-       and type(c.config_search[1]) == "string" and #c.config_search[1] > 0 then
-      return c.config_search[1]
-    end
+    if ok and type(c) == "table" then return c end
+  end
+  return nil
+end
+
+-- Derive our copies of the engine's constants from a decoded contract, KEEPING
+-- the literal fallbacks where a field is missing (older engine). Touches only
+-- primitives already defaulted above, so a partial contract degrades gracefully.
+local function applyContract(c)
+  local sl = type(c.status_line) == "table" and c.status_line or {}
+  if type(sl.sentinel) == "string" then STATUS_SENTINEL = sl.sentinel end
+  if type(sl.sep) == "string" then STATUS_SEP = sl.sep end
+  if type(sl.result_sentinel) == "string" then RESULT_SENTINEL = sl.result_sentinel end
+  if type(sl.llm_failed_suffix) == "string" then LLM_FAILED = sl.llm_failed_suffix end
+  if type(sl.paste_failed_suffix) == "string" then PASTE_FAILED = sl.paste_failed_suffix end
+  local d = type(c.daemon) == "table" and c.daemon or {}
+  local host = type(d.host) == "string" and d.host or "127.0.0.1"
+  if type(d.port) == "number" then DAEMON_PORT = math.floor(d.port) end
+  DAEMON_URL = "http://" .. host .. ":" .. DAEMON_PORT .. "/"
+end
+
+-- Ask the engine where its config lives instead of hard-coding the path. The
+-- cached contract carries `config_search` (the ordered list of paths the engine
+-- consults); we open the first one (expanding a leading ~). Only if the contract
+-- is unavailable do we fall back to the previous literal path.
+function resolveConfigPath()
+  local c = VB.contract or fetchContract()
+  if c and type(c.config_search) == "table"
+     and type(c.config_search[1]) == "string" and #c.config_search[1] > 0 then
+    return (c.config_search[1]:gsub("^~", HOME))
   end
   dbg("resolveConfigPath: contract unavailable, using literal fallback")
   return HOME .. "/.config/voicebridge/config.toml"
+end
+
+-- Open the user's config in the default editor, falling back to the shipped
+-- example when it doesn't exist yet. Shared by the window and the menubar.
+local function openConfig()
+  hs.execute("open -t '" .. resolveConfigPath() .. "' 2>/dev/null || open -t '"
+    .. DIR .. "/config.example.toml'")
 end
 
 -- ---- Dictation -----------------------------------------------------------
@@ -626,7 +850,7 @@ function showResult(text, llmFailed, handlers)
       roundedRectRadii = { xRadius = 14, yRadius = 14 },
       fillColor = { red = 0.07, green = 0.07, blue = 0.08, alpha = 0.94 } },
     { type = "text",
-      text = llmFailed and "Copied raw transcript (LLM step failed)" or "Copied to clipboard ✓",
+      text = resultBanner(llmFailed),
       textColor = { white = 1, alpha = 0.6 }, textSize = 12,
       frame = { x = 18, y = 12, w = W - 36, h = 18 } },
     { type = "text", text = preview,
@@ -665,20 +889,38 @@ end
 
 local WIN_W, WIN_H = 470, 650
 
-function readHistory(limit)
-  local f = io.open(HOME .. "/.voicebridge/history/history.jsonl", "r")
-  if not f then return {} end
-  local lines = {}
-  for line in f:lines() do lines[#lines + 1] = line end
-  f:close()
+-- The engine's resolved history.jsonl path (honours [history].dir via the
+-- contract's `resolved.history`); literal fallback for older engines / no contract.
+local function historyPath()
+  local c = VB.contract
+  local h = c and type(c.resolved) == "table" and c.resolved.history
+  if type(h) == "string" and #h > 0 then return h end
+  return HOME .. "/.voicebridge/history/history.jsonl"
+end
+
+-- Pure: newest-first history items from raw JSONL lines (most recent `limit`),
+-- decoded by an injected `decodeFn`; skips lines that don't decode to a record
+-- with text. Kept hs-free (readHistory injects hs.json.decode) for testing.
+local function parseHistory(lines, limit, decodeFn)
+  lines = lines or {}
+  local n = #lines
   local items = {}
-  for i = #lines, math.max(1, #lines - (limit or 30) + 1), -1 do
-    local ok, rec = pcall(hs.json.decode, lines[i])
+  for i = n, math.max(1, n - (limit or 30) + 1), -1 do
+    local ok, rec = pcall(decodeFn, lines[i])
     if ok and type(rec) == "table" and rec.text then
       items[#items + 1] = { ts = rec.ts or "", chars = rec.chars or #rec.text, text = rec.text }
     end
   end
   return items
+end
+
+function readHistory(limit)
+  local f = io.open(historyPath(), "r")
+  if not f then return {} end
+  local lines = {}
+  for line in f:lines() do lines[#lines + 1] = line end
+  f:close()
+  return parseHistory(lines, limit, hs.json.decode)
 end
 
 -- Pure window helpers (no hs.*), extracted so the window's logic is testable:
@@ -722,18 +964,20 @@ function pushWindowState()
     "window.vbState&&vbState(%q,%q,%f)", VB.state, timer, VB.level or 0))
 end
 
+-- Surface a delivered result. If the full app window is already open, refresh it
+-- in place; otherwise show the lightweight Copy/Paste/Email toast panel. A quick
+-- hotkey dictation must NOT summon the whole 470×650 window on every capture (the
+-- toast panel is what the README documents), so we no longer force it open here.
 function updateResult(text, llmFailed)
   VB.resultText = text or ""
-  if not VB.win then openWindow() end
-  if not VB.win then
-    notify("Alfred", llmFailed and "Copied raw transcript (LLM step failed)"
-                                      or "Copied to clipboard ✓")
-    return
+  if VB.win then
+    VB.win:evaluateJavaScript("window.vbResult&&vbResult(" .. jsStr(VB.resultText)
+      .. "," .. tostring(llmFailed and true or false) .. ")")
+    VB.win:evaluateJavaScript("window.vbHistory&&vbHistory(" .. hs.json.encode(readHistory(30)) .. ")")
+    VB.win:show():bringToFront()
+  else
+    showResult(VB.resultText, llmFailed, resultPanelHandlers())
   end
-  VB.win:evaluateJavaScript("window.vbResult&&vbResult(" .. jsStr(VB.resultText)
-    .. "," .. tostring(llmFailed and true or false) .. ")")
-  VB.win:evaluateJavaScript("window.vbHistory&&vbHistory(" .. hs.json.encode(readHistory(30)) .. ")")
-  VB.win:show():bringToFront()
 end
 
 function onWebMessage(message)
@@ -758,8 +1002,7 @@ function onWebMessage(message)
   elseif a == "copy" or a == "recopy" then
     hs.pasteboard.setContents(d.text or VB.resultText or "")   -- toast shown in-window
   elseif a == "editIntents" then
-    hs.execute("open -t '" .. resolveConfigPath() .. "' 2>/dev/null || open -t '"
-      .. DIR .. "/config.example.toml'")
+    openConfig()
   elseif a == "reloadModes" then
     refreshModes()
   elseif a == "saveIntent" then
@@ -767,9 +1010,8 @@ function onWebMessage(message)
   elseif a == "setModel" then
     if d.backend == "claude" or d.backend == "codex" then setModel(d.backend, d.model or "") end
   elseif a == "paste" then
-    hs.pasteboard.setContents(d.text or VB.resultText or "")
     if VB.win then VB.win:hide() end
-    hs.timer.doAfter(0.12, function() hs.eventtap.keyStroke({ "cmd" }, "v") end)
+    pasteText(d.text or VB.resultText or "", 0.12)   -- longer delay: window hides first
   end
 end
 
@@ -852,10 +1094,7 @@ local WIN_HEAD = [==[<!DOCTYPE html><html><head><meta charset="utf-8"><title>Alf
   <textarea id="typein" class="typein" placeholder="…or type here, then ⏎ to run  (⇧⏎ = new line)"></textarea>
   <div class="grid">
    <div class="field"><div class="flabel"><span>Format / intent</span><button id="editint" class="link">Edit prompt</button></div><select id="mode"></select></div>
-   <div class="field"><div class="flabel"><span>LLM backend</span></div><select id="backend">
-    <option value="default">Default (config)</option><option value="auto">auto</option>
-    <option value="claude">claude</option><option value="codex">codex</option>
-   </select></div>
+   <div class="field"><div class="flabel"><span>LLM backend</span></div><select id="backend"></select></div>
   </div>
   <div class="grid">
    <div class="field"><div class="flabel"><span>Claude model</span></div><select id="claudemodel"></select></div>
@@ -919,9 +1158,14 @@ local WIN_TAIL = [==[;
    s.value=current||'';
  }
  window.vbSettings=function(s){ s=s||{}; fillModelSelect('claudemodel',s.claude_models,s.claude_model); fillModelSelect('codexmodel',s.codex_models,s.codex_model); };
+ window.vbBackends=function(list,current){
+   const s=$('backend'); if(!s) return; s.innerHTML='';
+   const mk=(v,t)=>{const o=document.createElement('option');o.value=v;o.textContent=t;s.appendChild(o);};
+   mk('default','Default (config)'); (list||[]).forEach(b=>mk(b,b)); s.value=current||'default';
+ };
  const I=window.VB_INIT||{};
  vbModes(I.modes,I.modeIndex);
- $('backend').value=I.backend||'default';
+ vbBackends(I.backends,I.backend);
  $('translate').checked=I.translate!==false;
  vbResult(I.result||'');
  vbHistory(I.history||[]);
@@ -960,6 +1204,7 @@ function openWindow()
   VB.win = w
   local init = {
     modes = modesForJS(), modeIndex = 1,
+    backends = BACKENDS,
     backend = VB.backend or "default",
     translate = VB.winTranslate ~= false,
     result = VB.resultText or "",
@@ -1018,12 +1263,16 @@ end
 -- supplies the click callbacks by name so this stays free of hs.* — the live
 -- menu passes the real handlers; tests pass stubs and assert titles, the
 -- separators, and the backend radio's checked state.
-local function buildMenu(state, backend, actions)
+local function buildMenu(state, backend, actions, backends)
   actions = actions or {}
+  backends = backends or BACKENDS      -- one shared list (menubar + window)
   local function backendItem(label, value)
     return { title = label, checked = (backend == value),
              fn = function() if actions.setBackend then actions.setBackend(value) end end }
   end
+  local backendMenu = { { title = "Default (config)", checked = (backend == nil),
+      fn = function() if actions.setBackend then actions.setBackend(nil) end end } }
+  for _, b in ipairs(backends) do backendMenu[#backendMenu + 1] = backendItem(b, b) end
   return {
     { title = "Alfred — " .. tostring(state) ..
               (backend and ("  ·  " .. backend) or ""), disabled = true },
@@ -1032,13 +1281,7 @@ local function buildMenu(state, backend, actions)
     { title = "Dictate (toggle)", fn = actions.toggleDictate },
     { title = "Dictate as…", fn = actions.dictateWithMode },
     { title = "Type…", fn = actions.typePrompt },
-    { title = "Backend", menu = {
-        { title = "Default (config)", checked = (backend == nil),
-          fn = function() if actions.setBackend then actions.setBackend(nil) end end },
-        backendItem("auto", "auto"),
-        backendItem("claude", "claude"),
-        backendItem("codex", "codex"),
-      } },
+    { title = "Backend", menu = backendMenu },
     { title = "Cancel recording", fn = actions.cancel },
     { title = "-" },
     { title = "Open recordings folder", fn = actions.openRecordings },
@@ -1063,8 +1306,27 @@ if os.getenv("VB_LUA_TEST") then
            buildCaptureFlags = buildCaptureFlags,
            normalizeBackend = normalizeBackend,
            normalizeTranslate = normalizeTranslate,
+           parseHistory = parseHistory,
            -- hs-hotkey-menubar pure logic
-           buildMenu = buildMenu }
+           buildMenu = buildMenu, BACKENDS = BACKENDS,
+           -- engine-result pure logic
+           resultPayload = resultPayload, classifyResult = classifyResult,
+           errorMessage = errorMessage, resultBanner = resultBanner,
+           classifyPost = classifyPost, buildEngineArgv = buildEngineArgv }
+end
+
+-- ---- Consume the engine contract (one fetch, cached) ---------------------
+-- Ask the engine for its IPC contract and derive our port / history path /
+-- status-line sentinels from it, so the front-end tracks the engine instead of
+-- hard-coding. Fast (heavy libs are lazy-imported) and guarded above by the test
+-- seam (plain `lua` never reaches here). Silent fallback to the literal defaults
+-- when the engine or the contract call is unavailable.
+VB.contract = fetchContract()
+if VB.contract then
+  applyContract(VB.contract)
+  dbg("contract loaded: port=" .. tostring(DAEMON_PORT) .. " sentinel=" .. STATUS_SENTINEL)
+else
+  dbg("contract unavailable at load; using literal fallbacks")
 end
 
 -- ---- Menu bar ------------------------------------------------------------
@@ -1080,15 +1342,17 @@ VB.menubar:setMenu(function()
     setBackend = function(v) VB.backend = v end,
     cancel = function()
       if VB.recTask and VB.recTask:isRunning() then VB.recTask:terminate() end
+      if VB.state == "processing" then
+        VB.runId = (VB.runId or 0) + 1   -- invalidate any in-flight daemon result
+        cancelWatchdog()
+        if VB.engineTask then pcall(function() VB.engineTask:terminate() end); VB.engineTask = nil end
+      end
       destroyHUD(); setState("idle"); hs.alert.show("Cancelled", 0.8)
     end,
     openRecordings = function()
       hs.execute("open ~/Documents/VoiceBridge 2>/dev/null || open ~/Documents")
     end,
-    editConfig = function()
-      hs.execute("open -t '" .. resolveConfigPath() .. "' 2>/dev/null || open -t '"
-        .. DIR .. "/config.example.toml'")
-    end,
+    editConfig = openConfig,
     reloadModes = function() refreshModes() end,
     restartDaemon = function() restartDaemon() end,
     reloadHammerspoon = function() hs.reload() end,
