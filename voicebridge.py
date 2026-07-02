@@ -2031,14 +2031,22 @@ def cmd_doctor(args) -> int:
     print(f"{ok if mach == 'arm64' else warn}Architecture: {mach}"
           + ("" if mach == "arm64" else "  (mlx-whisper needs Apple Silicon)"))
 
-    # Python deps
+    # Python deps. Use find_spec (checks installed WITHOUT importing) so doctor
+    # doesn't pay the multi-second MLX framework import just to say "present".
+    import importlib.util as _ilu
+
+    def _installed(mod: str) -> bool:
+        try:
+            return _ilu.find_spec(mod) is not None
+        except Exception:                          # noqa: BLE001
+            return False
+
     for mod, hint in [("mlx_whisper", "pip install mlx-whisper"),
                       ("soundfile", "pip install soundfile"),
                       ("numpy", "pip install numpy")]:
-        try:
-            __import__(mod)
+        if _installed(mod):
             print(f"{ok}python module: {mod}")
-        except Exception:                          # noqa: BLE001
+        else:
             print(f"{bad}python module: {mod}   -> {hint}")
 
     # System tools
@@ -2064,11 +2072,7 @@ def cmd_doctor(args) -> int:
               "raw transcription still works)")
 
     # Local on-device backend (MLX-LM) — strict-local, no login, no network
-    try:
-        __import__("mlx_lm")
-        mlx_ok = True
-    except Exception:                              # noqa: BLE001
-        mlx_ok = False
+    mlx_ok = _installed("mlx_lm")
     print(f"{ok if mlx_ok else warn}python module: mlx_lm"
           + ("" if mlx_ok else "   -> pip install mlx-lm  (for backend = local)"))
     local_model = cfg["llm"].get("local_model", "")
@@ -2100,31 +2104,18 @@ def cmd_doctor(args) -> int:
     except Exception as e:                          # noqa: BLE001
         print(f"{bad}save_dir not writable: {sd} ({e})")
 
-    # macOS permissions (TCC). Auto-paste needs Accessibility for whichever app
-    # OWNS the process sending the keystroke (the app that launched the daemon —
-    # Hammerspoon or Raycast — not necessarily this terminal). This probe reports
-    # the *controlling* app's grant; it never types anything.
-    print("-" * 40)
+    # macOS permissions (TCC) — a STATIC note, not a live probe. Actively
+    # querying Accessibility (osascript "System Events" UI-elements-enabled) hangs
+    # for seconds inside a headless daemon with no Automation grant, and doctor is
+    # called on every Engine Status open. The runtime signal is better anyway:
+    # deliver() reports a ('copied','paste_failed') status when a real paste
+    # can't be delivered, so the front-end says so in context.
     if platform.system() == "Darwin":
-        try:
-            probe = subprocess.run(
-                [_macos_tool("osascript"), "-e",
-                 'tell application "System Events" to return UI elements enabled'],
-                capture_output=True, text=True, timeout=5, check=False)
-            ax = (probe.stdout or "").strip().lower()
-            if ax == "true":
-                print(f"{ok}Accessibility (auto-paste) granted for this process")
-            elif ax == "false":
-                print(f"{warn}Accessibility NOT granted — auto-paste will silently "
-                      "do nothing. Grant it to the app that runs Alfred "
-                      "(Hammerspoon/Raycast) in System Settings ▸ Privacy ▸ "
-                      "Accessibility.")
-            else:
-                print(f"{warn}Accessibility state unknown ({probe.stderr.strip()[:60]})")
-        except Exception as e:                      # noqa: BLE001
-            print(f"{warn}Accessibility check skipped ({e})")
-        print(f"{warn}Microphone: granted per-app to whatever launches `sox` "
-              "(Hammerspoon AND/OR Raycast). Grant both if you use both.")
+        print("-" * 40)
+        print(f"{warn}auto-paste needs Accessibility granted to the app that runs "
+              "Alfred (Raycast/Hammerspoon) in System Settings ▸ Privacy ▸ "
+              "Accessibility; the mic needs it per-app too. (Copy mode needs "
+              "neither.)")
 
     # Running daemon (identity + owner pid), so front-ends/users can see which
     # process owns the warm engine — auto-paste attribution follows that process.
