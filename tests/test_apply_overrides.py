@@ -18,7 +18,8 @@ NO_CFG = "/nonexistent/alfred-test-config.toml"
 
 def _ns(**kw):
     defaults = dict(backend=None, model=None, language=None, mode=None,
-                    translate=None, rewrite=None, optimize=None, paste=None)
+                    translate=None, rewrite=None, optimize=None, paste=None,
+                    transcribe_only=None)
     defaults.update(kw)
     return type("NS", (), defaults)()
 
@@ -51,6 +52,24 @@ class ApplyOverrides(unittest.TestCase):
         cfg2 = self._cfg()
         vb._apply_overrides(cfg2, _ns(mode="raw"))
         self.assertFalse(cfg2["processing"]["rewrite"])  # raw does NOT force it
+
+    def test_transcribe_only_forces_every_stage_off(self):
+        # --transcribe-only wins over --translate and --mode's implicit rewrite:
+        # a pure transcript, no LLM stage of any kind.
+        cfg = self._cfg()
+        vb._apply_overrides(
+            cfg, _ns(mode="email", translate=True, optimize=True,
+                     transcribe_only=True))
+        self.assertFalse(cfg["processing"]["translate"])
+        self.assertFalse(cfg["processing"]["rewrite"])
+        self.assertFalse(cfg["processing"]["optimize"])
+
+    def test_transcribe_only_none_leaves_stages(self):
+        # Unset -> no effect (config's own stage settings stand).
+        cfg = self._cfg()
+        cfg["processing"]["translate"] = True
+        vb._apply_overrides(cfg, _ns(transcribe_only=None))
+        self.assertTrue(cfg["processing"]["translate"])
 
     def test_paste_flips_output_mode(self):
         cfg = self._cfg()

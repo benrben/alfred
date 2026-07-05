@@ -100,6 +100,48 @@ class CombinedPromptFolding(unittest.TestCase):
         self.assertEqual(out, "raw text")
         self.assertEqual(self.calls, [], "no LLM call when nothing is enabled")
 
+    def test_long_transcript_is_chunked_across_calls(self):
+        # An 18-minute dictation used to translate in ONE call and truncate at the
+        # local token cap. It must now split into several bounded calls, each
+        # under the char budget, and join into one result (nothing lost).
+        cfg = _cfg(translate=True, rewrite=False, optimize=False,
+                   translate_via="llm", combine_stages=True)
+        budget = vb._chunk_char_budget(cfg)
+        long_text = ("This is a spoken sentence in the meeting. " * 400).strip()
+        self.assertGreater(len(long_text), budget)
+        vb.process_text(long_text, cfg)
+        self.assertGreater(len(self.calls), 1, "long input must split into chunks")
+        for prompt in self.calls:
+            body = prompt.split("INPUT TEXT:")[-1]
+            self.assertLessEqual(len(body), budget + 200)  # +instruction slack
+
+    def test_short_transcript_stays_single_call(self):
+        cfg = _cfg(translate=True, rewrite=False, optimize=False,
+                   translate_via="llm", combine_stages=True)
+        vb.process_text("A short line.", cfg)
+        self.assertEqual(len(self.calls), 1)
+
+
+class SplitForProcessing(unittest.TestCase):
+    def test_short_text_is_one_chunk(self):
+        self.assertEqual(vb._split_for_processing("hi there", 100), ["hi there"])
+
+    def test_splits_on_sentence_bounds_under_budget(self):
+        text = ". ".join(f"Sentence number {i}" for i in range(200)) + "."
+        chunks = vb._split_for_processing(text, 300)
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(c) <= 300 for c in chunks))
+        # No text is dropped: every sentence's core survives somewhere.
+        joined = " ".join(chunks)
+        self.assertIn("Sentence number 0", joined)
+        self.assertIn("Sentence number 199", joined)
+
+    def test_lone_oversized_sentence_is_hard_split(self):
+        text = "x" * 1000  # no sentence break at all
+        chunks = vb._split_for_processing(text, 250)
+        self.assertTrue(all(len(c) <= 250 for c in chunks))
+        self.assertEqual("".join(chunks), text)
+
 
 if __name__ == "__main__":
     unittest.main()

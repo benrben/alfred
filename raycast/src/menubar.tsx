@@ -21,6 +21,13 @@ export default function MenuBar() {
         // While recording, open Dictate already in "stop" mode (one click stops).
         onAction={open("dictate", recording ? { stop: true } : undefined)}
       />
+      {!recording && (
+        <MenuBarExtra.Item
+          title="Transcribe Only"
+          icon={Icon.Text}
+          onAction={open("transcribe")}
+        />
+      )}
       <MenuBarExtra.Separator />
       <MenuBarExtra.Item
         title="Transform Text"

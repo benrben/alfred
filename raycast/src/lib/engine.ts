@@ -242,11 +242,12 @@ export function resolvedPath(
 /** The recorder command args (int16 mono 16 kHz WAV) from the contract's
  * `audio.sox_args`, with the output WAV appended. Falls back to the literal
  * invariant when an older engine omits `audio`. */
-// Hard cap on a single recording (seconds). A dictation is never this long; the
-// cap makes sox self-stop so a recording that's dismissed and never stopped
-// (the "Esc keeps recording" flow) can't run forever and fill the disk / hold
-// the mic. Applied as a sox `trim 0 <secs>` output effect.
-export const MAX_RECORD_SECS = 300;
+// Hard cap on a single recording (seconds). A long note/meeting dictation can
+// run many minutes, so this is generous (60 min); the cap only exists so a
+// recording that's dismissed and never stopped (the "Esc keeps recording" flow)
+// can't run forever and fill the disk / hold the mic. Applied as a sox
+// `trim 0 <secs>` output effect. Mirrors the Hammerspoon front-end's cap.
+export const MAX_RECORD_SECS = 3600;
 
 export function recorderArgs(wav: string): string[] {
   const a = currentContract().audio?.sox_args;
@@ -506,17 +507,22 @@ export function configFormat(): FormatChoice {
   };
 }
 
+/** The "pure transcript" format — every LLM stage forced off. Static (no modes
+ * needed), so the dedicated Transcribe Only command can pin it synchronously
+ * before the mode catalog loads. Keeps the three --no-* flags (not the newer
+ * --transcribe-only) so it still works against an older engine. */
+export function rawFormat(): FormatChoice {
+  return {
+    id: RAW_FORMAT_ID,
+    title: "Raw transcript",
+    subtitle: "No AI — exactly what you said",
+    ai: false,
+    flags: ["--no-rewrite", "--no-translate", "--no-optimize"],
+  };
+}
+
 export function buildFormats(modes: Mode[]): FormatChoice[] {
-  const list: FormatChoice[] = [
-    configFormat(),
-    {
-      id: RAW_FORMAT_ID,
-      title: "Raw transcript",
-      subtitle: "No AI — exactly what you said",
-      ai: false,
-      flags: ["--no-rewrite", "--no-translate", "--no-optimize"],
-    },
-  ];
+  const list: FormatChoice[] = [configFormat(), rawFormat()];
   for (const m of modes) {
     list.push({
       id: m.key,

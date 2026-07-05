@@ -80,7 +80,8 @@ class LocalBackend(unittest.TestCase):
         self.assertEqual(out, "HELLO WORLD")          # fences stripped
         self.assertEqual(len(self.loads), 1)
         self.assertEqual(len(self.gens), 1)
-        self.assertEqual(self.gens[0]["max_tokens"], 1024)
+        self.assertEqual(self.gens[0]["max_tokens"],
+                         vb.DEFAULTS["llm"]["local_max_tokens"])
 
     def test_model_is_warm_loaded_once(self):
         cfg = self._cfg()

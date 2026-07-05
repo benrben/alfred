@@ -119,7 +119,7 @@ class TranscribeBatchDelegates(unittest.TestCase):
             return "AUDIO"
         vb._load_audio_16k = fake_load
         def fake_samples(audio, cfg, *, language, whisper_translate,
-                         initial_prompt=""):
+                         initial_prompt="", timestamps=False):
             seen["audio"] = audio
             seen["wt"] = whisper_translate
             return ("done", "en")

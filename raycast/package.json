@@ -16,6 +16,13 @@
       "mode": "view"
     },
     {
+      "name": "transcribe",
+      "title": "Transcribe Only",
+      "subtitle": "Alfred",
+      "description": "Record and get the raw transcript — no AI translate/rewrite/optimize. Fast and private. Bind a hotkey.",
+      "mode": "view"
+    },
+    {
       "name": "transform-text",
       "title": "Transform Text",
       "subtitle": "Alfred",

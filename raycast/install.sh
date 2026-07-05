@@ -152,15 +152,16 @@ cat <<'EOF'
 
 ------------------------------------------------------------------
 Installed (engine + extension). Open Raycast and search "Alfred":
-  Dictate · Transform Text · Type & Process · Manage Intents
-  History · Alfred Menu Bar · Engine Status
+  Dictate · Transcribe Only · Transform Text · Type & Process
+  Manage Intents · History · Alfred Menu Bar · Engine Status
 
 Next:
   1. Run "Engine Status" once to confirm the engine is reachable.
      (The daemon warms the Whisper model on first use — first capture
      may take ~30s while it downloads/loads the model.)
-  2. Assign a hotkey to "Dictate" (Raycast: select it -> Cmd+K ->
-     Configure Command -> Hotkey). Avoid Cmd+Opt+D/I/T/V if you also
+  2. Assign a hotkey to "Dictate" (and "Transcribe Only" for one-touch raw
+     dictation) — Raycast: select it -> Cmd+K ->
+     Configure Command -> Hotkey. Avoid Cmd+Opt+D/I/T/V/R if you also
      run the Hammerspoon front-end.
   3. First dictation prompts for Microphone access for Raycast — allow it.
 

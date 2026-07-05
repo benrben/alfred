@@ -91,14 +91,22 @@ function waitForExit(pid: number, timeoutMs: number): Promise<void> {
   });
 }
 
-export default function Dictate(props: { launchContext?: { stop?: boolean } }) {
+export default function Dictate(props: {
+  launchContext?: { stop?: boolean };
+  // When set (the Transcribe Only command), the capture starts pinned to this
+  // format instead of the config default — so streaming and the final transcribe
+  // use its flags from the very first frame, before the mode catalog loads.
+  forceFormat?: FormatChoice;
+}) {
   const [phase, setPhase] = useState<Phase>("recording");
   const [, setTick] = useState(0);
   const [error, setError] = useState("");
   const [result, setResult] = useState<DeliveredResult | null>(null);
   const [resultNote, setResultNote] = useState("");
   const [formats, setFormats] = useState<FormatChoice[]>([]);
-  const [formatId, setFormatId] = useState<string>(CONFIG_FORMAT_ID);
+  const [formatId, setFormatId] = useState<string>(
+    props.forceFormat?.id ?? CONFIG_FORMAT_ID,
+  );
   const [prog, setProg] = useState<Progress | null>(null);
   const stateRef = useRef<RecState | null>(null);
 
@@ -200,11 +208,12 @@ export default function Dictate(props: { launchContext?: { stop?: boolean } }) {
   }
 
   function currentFormat(): FormatChoice {
-    // Prefer the loaded list; else the format persisted in the recording state
-    // (menu-bar cold-stop, before modes load); else "use config" (no flags) —
-    // never a stage-disabling raw.
+    // Prefer the loaded list; else a forced format (Transcribe Only) so its flags
+    // apply before the catalog loads; else the format persisted in the recording
+    // state (menu-bar cold-stop, before modes load); else "use config".
     return (
       formats.find((f) => f.id === formatId) ??
+      props.forceFormat ??
       stateRef.current?.format ??
       configFormat()
     );

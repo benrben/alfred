@@ -70,8 +70,19 @@ class BoolFlagTristate(unittest.TestCase):
     def test_all_stage_flags_default_none(self):
         # Unset flags MUST stay None so _apply_overrides leaves config untouched.
         ns = vb.build_parser().parse_args(["process", "a.wav"])
-        for name in ("translate", "rewrite", "optimize", "paste"):
+        for name in ("translate", "rewrite", "optimize", "paste",
+                     "transcribe_only"):
             self.assertIsNone(getattr(ns, name), f"{name} must default None")
+
+    def test_transcribe_only_flag(self):
+        # --transcribe-only is a plain store_true (dest transcribe_only), default
+        # None when unset so it only forces stages off when explicitly passed.
+        parser = vb.build_parser()
+        self.assertIsNone(
+            parser.parse_args(["process", "a.wav"]).transcribe_only)
+        self.assertIs(
+            parser.parse_args(["process", "a.wav", "--transcribe-only"])
+            .transcribe_only, True)
 
     def test_mutually_exclusive(self):
         parser = vb.build_parser()

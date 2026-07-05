@@ -30,6 +30,10 @@ pickers default to **Default (config)**, which uses whatever you've set in
   offers Paste / Copy, **Reprocess as…** (change the intent/format), **Refine with
   Feedback…** (`⌘E` — tell it what to change: "make it shorter", "more formal",
   "fix the date"), and Dictate Again.
+- **Transcribe Only** — the same recorder pinned to **Raw transcript**: no AI
+  (no translate / rewrite / optimize), just exactly what you said. Fast and fully
+  private — bind it a hotkey for instant dictation-to-clipboard. You can still
+  switch to an AI format mid-take from the `⌘F` picker.
 - **Transform Text** — prefilled from the selection (or clipboard): pick a format,
   run, then Copy / Paste / Reprocess the result.
 - **Type & Process** — type a line and run it through the pipeline.
@@ -40,7 +44,7 @@ pickers default to **Default (config)**, which uses whatever you've set in
   action on the Transform/Type forms.
 - **Alfred Menu Bar** — recording state (🔴 while live) + quick access to every
   command. While recording it shows **Stop & Transcribe** (one click stops);
-  otherwise **Dictate**.
+  otherwise **Dictate** and **Transcribe Only**.
 - **Engine Status** — daemon health, the current **default format / stages /
   backend**, resolved paths, and the engine's `doctor`. Handy right after install.
 
@@ -62,9 +66,9 @@ It leaves a **permanent local install** — it runs at full speed; the
 tied to this folder. After it finishes:
 
 1. Run **Engine Status** once to confirm the engine is reachable.
-2. Assign a hotkey to **Dictate** (Raycast → select the command → `⌘K` →
-   Configure Command → Hotkey). Avoid `⌥⌘D/I/T/V` if you also run the Hammerspoon
-   front-end.
+2. Assign a hotkey to **Dictate** (and, if you want one-touch raw dictation,
+   **Transcribe Only**) — Raycast → select the command → `⌘K` → Configure Command
+   → Hotkey. Avoid `⌥⌘D/I/T/V/R` if you also run the Hammerspoon front-end.
 
 To develop with hot-reload instead, run `npm install && npm run dev` and leave it
 running while you edit.

@@ -305,14 +305,17 @@ do
   local hits = {}
   local m4 = H.buildMenu("idle", nil, {
     toggleDictate = function() hits.dictate = true end,
+    toggleTranscribeOnly = function() hits.rawtx = true end,
     cancel        = function() hits.cancel = true end,
   })
   local function itemByTitle(m, t)
     for _, it in ipairs(m) do if it.title == t then return it end end
   end
   itemByTitle(m4, "Dictate (toggle)").fn()
+  itemByTitle(m4, "Transcribe only").fn()
   itemByTitle(m4, "Cancel recording").fn()
   eq(hits.dictate, true, "Dictate item wired to toggleDictate")
+  eq(hits.rawtx, true, "Transcribe only item wired to toggleTranscribeOnly")
   eq(hits.cancel, true, "Cancel item wired to cancel")
 end
 

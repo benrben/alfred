@@ -85,10 +85,13 @@ transform text, manage intents, history, menu bar, engine status). See
 
 - **Cmd+Option+D** — dictate (uses your config's mode). Press once to start, again to stop.
 - **Cmd+Option+I** — dictate *with intent*: pick a format first, then speak.
+- **Cmd+Option+R** — **transcribe only**: record and get the raw transcript, no LLM
+  (no translate/rewrite/optimize). Fast and fully private.
 - **Cmd+Option+T** — type a line and run it through the same pipeline.
 - **Cmd+Option+V** — open the **Alfred window** (see [below](#the-alfred-window)).
 - The menu-bar icon shows state (🎙️ idle / 🔴 recording / ⏳ processing) and has a menu
-  (Open window, Dictate, Dictate as…, Type…, Backend ▸, Restart engine, Reload intent modes).
+  (Open window, Dictate, Transcribe only, Dictate as…, Type…, Backend ▸, Restart engine,
+  Reload intent modes).
 
 While recording, a floating **HUD** shows a live `mm:ss` timer and a mic-level
 meter so you can see it's actually hearing you. When a result is ready, a small
@@ -149,13 +152,21 @@ PY=./.venv/bin/python
 
 $PY voicebridge.py text "um so like the meeting is tuesday" --rewrite --stdout
 $PY voicebridge.py process recording.wav --translate --mode email
+$PY voicebridge.py process recording.wav --transcribe-only   # raw, no LLM
 $PY voicebridge.py history            # list recent results
 $PY voicebridge.py history --copy 0   # re-copy the most recent
 ```
 
 Per-run flags override the config: `--translate/--no-translate`, `--rewrite`,
-`--optimize`, `--mode email|message|commit|prompt|notes|raw`, `--backend
-local|auto|claude|codex`, `--model`, `--language he`, `--paste`, `--stdout`.
+`--optimize`, `--transcribe-only` (pure transcript — pins every LLM stage off,
+winning over the others), `--mode email|message|commit|prompt|notes|raw`,
+`--backend local|auto|claude|codex`, `--model`, `--language he`, `--paste`,
+`--stdout`.
+
+**Long recordings.** There's no cap on how long you can speak (the front-ends
+self-stop at 60 min as a runaway guard). A long transcript is auto-split at
+sentence boundaries into chunks that each stay under `local_max_tokens`, so
+translate/rewrite output scales to any length instead of truncating mid-way.
 
 ## Configure
 

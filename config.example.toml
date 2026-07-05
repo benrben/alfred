@@ -44,7 +44,10 @@ backend = "local"
 # First use downloads it (~2GB for the 3B-4bit). Qwen3-4B/8B once you've confirmed
 # the repo is available is a quality upgrade.
 local_model = "mlx-community/Qwen2.5-3B-Instruct-4bit"
-local_max_tokens = 1024   # cap on generated tokens per transform
+# Cap on generated tokens per transform. A long transcript is auto-split into
+# chunks that each stay under this, so raising it just means fewer, larger LLM
+# calls (never a truncated result). Lower it only to bound a runaway local model.
+local_max_tokens = 4096
 local_idle_secs = 600     # free the in-memory model after this many idle seconds
 # Aliases track the latest model and are safer than dated names.
 claude_model = "sonnet"

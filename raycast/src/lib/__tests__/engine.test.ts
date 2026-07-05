@@ -383,6 +383,25 @@ describe("recorderArgs", () => {
       String(engine.MAX_RECORD_SECS),
     ]);
   });
+
+  it("caps recordings generously (>= 30 min) so long dictation isn't cut off", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.MAX_RECORD_SECS).toBeGreaterThanOrEqual(1800);
+  });
+});
+
+describe("rawFormat", () => {
+  it("is a non-AI format that pins every LLM stage off", async () => {
+    const { engine } = await freshEngine();
+    const raw = engine.rawFormat();
+    expect(raw.id).toBe(engine.RAW_FORMAT_ID);
+    expect(raw.ai).toBe(false);
+    expect(raw.flags).toEqual([
+      "--no-rewrite",
+      "--no-translate",
+      "--no-optimize",
+    ]);
+  });
 });
 
 describe("contract path-derivation", () => {

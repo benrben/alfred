@@ -111,5 +111,6 @@ Next steps:
         ./.venv/bin/python voicebridge.py text "hello   world" --rewrite --stdout
 
   Hotkeys:  Cmd+Option+D = dictate (press again to stop)   Cmd+Option+T = type
+            Cmd+Option+R = transcribe only (raw, no LLM)   Cmd+Option+I = intent
 ------------------------------------------------------------------
 EOF

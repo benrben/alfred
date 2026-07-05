@@ -213,7 +213,8 @@ class CmdStreamFinishFallback(unittest.TestCase):
 
     def test_no_session_falls_back_to_batch_transcribe(self):
         seen = {}
-        def fake_tx(path, cfg, *, language, whisper_translate):
+        def fake_tx(path, cfg, *, language, whisper_translate,
+                    timestamps=False):
             seen["path"] = path
             return ("streamed words", "en")
         vb.transcribe = fake_tx

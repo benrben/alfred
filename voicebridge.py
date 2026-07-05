@@ -40,6 +40,7 @@ import datetime as _dt
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -89,7 +90,10 @@ DEFAULTS: dict = {
         # (keyless) as an opt-in quality boost. See adr-local-intent-default.
         "backend": "local",          # local|auto|claude|codex
         "local_model": "mlx-community/Qwen2.5-3B-Instruct-4bit",
-        "local_max_tokens": 1024,    # cap on generated tokens per transform
+        "local_max_tokens": 4096,    # cap on generated tokens per transform. A
+                                     # long transcript is auto-split into chunks
+                                     # that each stay under this (see process_text),
+                                     # so raising it just means fewer, larger calls.
         "local_idle_secs": 600,      # free the in-memory model after N idle secs
         "claude_model": "sonnet",    # alias tracks latest; safer than dates
         "codex_model": "",           # empty = codex default
@@ -359,11 +363,40 @@ def _load_audio_16k(path: str):
     return audio
 
 
+def _format_ts(seconds: float) -> str:
+    """Format a segment-start time as [m:ss] (or [h:mm:ss] past an hour)."""
+    s = max(0, int(seconds))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"[{h}:{m:02d}:{sec:02d}]" if h else f"[{m}:{sec:02d}]"
+
+
+def _format_segments(segments) -> str:
+    """One '[m:ss] text' line per Whisper segment; empty segments dropped.
+    Pure and defensive: a malformed segment (no start/text) is skipped rather
+    than raising — timestamped output must never be why a capture fails."""
+    lines = []
+    for seg in segments or []:
+        try:
+            text = (seg.get("text") or "").strip()
+            if not text:
+                continue
+            lines.append(f"{_format_ts(float(seg.get('start', 0)))} {text}")
+        except Exception:                            # noqa: BLE001
+            continue
+    return "\n".join(lines)
+
+
 def transcribe_samples(audio, cfg: dict, *, language: str | None,
                        whisper_translate: bool,
                        initial_prompt: str = "",
-                       decode_opts: dict | None = None) -> tuple[str, str | None]:
+                       decode_opts: dict | None = None,
+                       timestamps: bool = False) -> tuple[str, str | None]:
     """Transcribe a mono float32 16 kHz numpy array. Return (text, lang).
+
+    With timestamps=True the text is one '[m:ss] …' line per Whisper segment
+    (for transcript files / players that seek). LLM stages would rewrite the
+    markers like any other text, so callers pair it with --transcribe-only.
 
     decode_opts passes extra Whisper decode options (e.g. the streaming path
     disables condition_on_previous_text so a hallucinated repeat in one window
@@ -394,6 +427,11 @@ def transcribe_samples(audio, cfg: dict, *, language: str | None,
         kwargs.update(decode_opts)
 
     result = mlx_whisper.transcribe(audio, **kwargs)
+    if timestamps:
+        text = _format_segments(result.get("segments"))
+        # Fall back to plain text if segments came back empty/malformed.
+        if text:
+            return text, result.get("language")
     return (result.get("text") or "").strip(), result.get("language")
 
 
@@ -422,11 +460,13 @@ def _rms(buf) -> float:
 
 
 def transcribe(audio_path: str, cfg: dict, *, language: str | None,
-               whisper_translate: bool) -> tuple[str, str | None]:
+               whisper_translate: bool,
+               timestamps: bool = False) -> tuple[str, str | None]:
     """Return (text, detected_language) for a whole audio file (batch)."""
     audio = _load_audio_16k(audio_path)
     return transcribe_samples(audio, cfg, language=language,
-                              whisper_translate=whisper_translate)
+                              whisper_translate=whisper_translate,
+                              timestamps=timestamps)
 
 
 # --- Streaming STT: transcribe a recording WHILE it's still being recorded -----
@@ -1311,6 +1351,80 @@ def single_stage_prompt(kind: str, rewrite_instr: str, text: str) -> str:
     return f"{instr}\n\n{_TAIL}\n\nINPUT TEXT:\n{text}"
 
 
+# Chunking for long transcripts. The local MLX backend caps OUTPUT at
+# local_max_tokens (claude/codex don't, but still have context limits + the
+# daemon timeout). A translate/rewrite of an 18-minute dictation in ONE call
+# therefore truncates at the cap — the transcript is complete but the processed
+# text stops ~1024 tokens in. So we split a long input at sentence boundaries
+# into chunks whose expected output stays under the cap, process each, and join.
+# A short input is a single chunk -> identical to the old one-call behaviour.
+_CHARS_PER_TOKEN = 3            # conservative (small) est: fewer chars/token ->
+                               # smaller, safer chunks. Hebrew/English mixed.
+_SENT_SPLIT = re.compile(r"(?<=[.!?…。！？])\s+")
+
+
+def _chunk_char_budget(cfg: dict) -> int:
+    """Max INPUT chars per processing chunk so a chunk's OUTPUT stays under the
+    local token cap. Derived from local_max_tokens even for non-local backends —
+    it's a sane reliability bound everywhere (and the cap that actually truncates
+    is the local one). 0.6 leaves headroom for translation expanding the text."""
+    max_tokens = int(cfg["llm"].get("local_max_tokens", 4096))
+    return max(2000, int(max_tokens * 0.6 * _CHARS_PER_TOKEN))
+
+
+def _split_for_processing(text: str, max_chars: int) -> list[str]:
+    """Split `text` into <=max_chars chunks, breaking at paragraph then sentence
+    boundaries so a chunk never cuts mid-sentence. A single over-long sentence is
+    hard-split as a last resort. Returns [text] when it already fits (the common
+    case), so short captures make exactly one LLM call as before."""
+    if len(text) <= max_chars:
+        return [text]
+    # Prefer paragraph breaks, then sentences within a paragraph.
+    units: list[str] = []
+    for para in text.split("\n\n"):
+        para = para.strip()
+        if not para:
+            continue
+        if len(para) <= max_chars:
+            units.append(para)
+            continue
+        for sent in _SENT_SPLIT.split(para):
+            sent = sent.strip()
+            if not sent:
+                continue
+            while len(sent) > max_chars:          # a lone huge sentence
+                units.append(sent[:max_chars])
+                sent = sent[max_chars:]
+            if sent:
+                units.append(sent)
+    chunks: list[str] = []
+    cur = ""
+    for u in units:
+        if cur and len(cur) + 1 + len(u) > max_chars:
+            chunks.append(cur)
+            cur = u
+        else:
+            cur = f"{cur} {u}" if cur else u
+    if cur:
+        chunks.append(cur)
+    return chunks or [text]
+
+
+def _process_chunk(text: str, cfg: dict, stages: dict, backends: list[str],
+                   rewrite_instr: str) -> str:
+    """Run the enabled stages over one chunk — one combined LLM call, or a call
+    per stage when combine_stages is off. Falls back to the input on empty."""
+    if cfg["processing"]["combine_stages"]:
+        prompt = build_combined_prompt(stages, rewrite_instr, text)
+        return run_llm_fallback(backends, prompt, cfg) or text
+    out = text
+    for kind in ("translate", "rewrite", "optimize"):
+        if stages[kind]:
+            prompt = single_stage_prompt(kind, rewrite_instr, out)
+            out = run_llm_fallback(backends, prompt, cfg) or out
+    return out
+
+
 def process_text(text: str, cfg: dict) -> str:
     text = (text or "").strip()
     if not text:
@@ -1322,16 +1436,12 @@ def process_text(text: str, cfg: dict) -> str:
     backends = candidate_backends(cfg)
     rewrite_instr = rewrite_instruction(cfg)
 
-    if cfg["processing"]["combine_stages"]:
-        prompt = build_combined_prompt(stages, rewrite_instr, text)
-        return run_llm_fallback(backends, prompt, cfg) or text
-
-    out = text
-    for kind in ("translate", "rewrite", "optimize"):
-        if stages[kind]:
-            prompt = single_stage_prompt(kind, rewrite_instr, out)
-            out = run_llm_fallback(backends, prompt, cfg) or out
-    return out
+    chunks = _split_for_processing(text, _chunk_char_budget(cfg))
+    if len(chunks) == 1:
+        return _process_chunk(chunks[0], cfg, stages, backends, rewrite_instr)
+    parts = [_process_chunk(c, cfg, stages, backends, rewrite_instr)
+             for c in chunks]
+    return " ".join(p.strip() for p in parts if p and p.strip())
 
 
 def refine_text(text: str, instruction: str, cfg: dict) -> str:
@@ -1660,6 +1770,12 @@ def _apply_overrides(cfg: dict, args) -> dict:
         val = getattr(args, name)
         if val is not None:
             cfg["processing"][name] = val
+    # --transcribe-only wins over every stage toggle above (and --mode's implicit
+    # rewrite): a pure transcript, no LLM. Applied last so nothing re-enables it.
+    if getattr(args, "transcribe_only", None):
+        cfg["processing"]["translate"] = False
+        cfg["processing"]["rewrite"] = False
+        cfg["processing"]["optimize"] = False
     if getattr(args, "paste", None) is not None:
         cfg["output"]["mode"] = "paste" if args.paste else "copy"
     return cfg
@@ -1734,6 +1850,7 @@ def cmd_process(args) -> int:
         text, lang = transcribe(
             audio, cfg, language=cfg["stt"]["language"],
             whisper_translate=whisper_translate,
+            timestamps=bool(getattr(args, "timestamps", None)),
         )
     except Exception as e:                       # noqa: BLE001
         sys.stderr.write(f"error: transcription failed: {e}\n")
@@ -1805,7 +1922,9 @@ def cmd_stream_finish(args) -> int:
         try:
             text, lang = transcribe(args.audio, cfg,
                                     language=cfg["stt"]["language"],
-                                    whisper_translate=wt)
+                                    whisper_translate=wt,
+                                    timestamps=bool(getattr(args, "timestamps",
+                                                            None)))
         except Exception as e:                        # noqa: BLE001
             sys.stderr.write(f"error: transcription failed: {e}\n")
             _maybe_remove_audio(args.audio, cfg)
@@ -1932,8 +2051,6 @@ def cmd_set_intent(args) -> int:
     (the old code backed up the already-mutated text, so a restore lost exactly
     the prompt it was meant to protect). Existing extra keys (e.g. replace) are
     kept."""
-    import re
-
     import tomlkit
     key = (args.key or "").strip()
     if not key or not re.fullmatch(r"[A-Za-z0-9_-]+", key):
@@ -2223,6 +2340,20 @@ def add_common(p):
     _bool_flag(p, "translate", "translate output to English", "do not translate")
     _bool_flag(p, "rewrite", "clean up & shape to intent", "do not rewrite")
     _bool_flag(p, "optimize", "tighten & clarify", "do not optimize")
+    # Transcribe-only: a one-flag "pure transcript" that pins EVERY LLM stage off,
+    # winning over --translate/--rewrite/--optimize/--mode. Front-ends surface it
+    # as a dedicated "Transcribe Only" capture.
+    p.add_argument("--transcribe-only", dest="transcribe_only",
+                   action="store_true", default=None,
+                   help="pure transcription: skip all LLM stages "
+                        "(translate/rewrite/optimize)")
+    # Timestamped transcripts: '[m:ss] …' per Whisper segment. Batch paths only
+    # (process / stream-finish's no-session fallback); a live streaming session
+    # transcribes in windows whose segment clocks restart per chunk, so it stays
+    # plain. LLM stages would rewrite the markers — pair with --transcribe-only.
+    p.add_argument("--timestamps", action="store_true", default=None,
+                   help="prefix each transcript segment with [m:ss] "
+                        "(batch only; use with --transcribe-only)")
     _bool_flag(p, "paste", "auto-paste after copying", "copy only")
     p.add_argument("--stdout", action="store_true",
                    help="print result to stdout instead of clipboard/file")

@@ -9,6 +9,7 @@
 -- Hotkeys (defaults): Dictate = Cmd+Option+D (press to start, press again to stop)
 --                     Intent  = Cmd+Option+I (dictate, then pick a format/intent)
 --                     Type    = Cmd+Option+T (typed-input box -> same pipeline)
+--                     Raw     = Cmd+Option+R (transcribe only, no LLM)
 -- Switch LLM backend from the menu-bar (Backend ▸). Edit/add intent formats in
 -- config.toml under [intent]; "Reload intent modes" refreshes the picker.
 --
@@ -22,12 +23,18 @@ local PYTHON = DIR .. "/.venv/bin/python3"         -- created by install.sh
 local SCRIPT = DIR .. "/voicebridge.py"
 local SOX    = "/opt/homebrew/bin/sox"             -- output of `which sox`
 
-local DICTATE_HOTKEY = { mods = { "cmd", "option" }, key = "d" }   -- dictate, no intent
-local INTENT_HOTKEY  = { mods = { "cmd", "option" }, key = "i" }   -- dictate + pick format
-local TYPE_HOTKEY    = { mods = { "cmd", "option" }, key = "t" }   -- type + pick format
-local WINDOW_HOTKEY  = { mods = { "cmd", "option" }, key = "v" }   -- open the app window
-local SHOW_METER     = true                         -- live mic-level bar in the HUD
-local DAEMON_PORT    = 8763                          -- warm background engine (localhost)
+local DICTATE_HOTKEY  = { mods = { "cmd", "option" }, key = "d" }   -- dictate, no intent
+local INTENT_HOTKEY   = { mods = { "cmd", "option" }, key = "i" }   -- dictate + pick format
+local TYPE_HOTKEY     = { mods = { "cmd", "option" }, key = "t" }   -- type + pick format
+local WINDOW_HOTKEY   = { mods = { "cmd", "option" }, key = "v" }   -- open the app window
+local RAWTX_HOTKEY    = { mods = { "cmd", "option" }, key = "r" }   -- transcribe only (no LLM)
+local SHOW_METER      = true                         -- live mic-level bar in the HUD
+local DAEMON_PORT     = 8763                          -- warm background engine (localhost)
+-- Hard cap on a single recording (seconds). Generous (60 min) for long
+-- notes/meetings; the cap only stops a forgotten recorder from running forever
+-- and filling the disk. Applied as a sox `trim 0 <secs>` effect. Mirrors the
+-- Raycast front-end's MAX_RECORD_SECS.
+local MAX_RECORD_SECS = 3600
 -- ====================================================================
 
 -- Clean up a previous load (so config reloads don't stack UI/hotkeys/timers).
@@ -151,7 +158,7 @@ local setState, notify, tmpWav, fmtTime, dbg
 local showHUD, updateHUD, destroyHUD, soxStream
 local parseStatus, onResult, runEngine, refreshModes, resultPanelHandlers
 local resolveConfigPath
-local onRecDone, startRecording, stopRecording, toggleDictate
+local onRecDone, startRecording, stopRecording, toggleDictate, toggleTranscribeOnly
 local pickMode, dictateWithMode, typePrompt
 local closeResult, resultClick, showResult
 local openWindow, closeWindow, onWebMessage, pushWindowState, updateResult
@@ -711,8 +718,10 @@ function startRecording()
   VB.wav = tmpWav()
   VB.level = 0
   -- `-S` shows the progress/VU meter on stderr so we can drive the level bar.
+  -- `trim 0 MAX_RECORD_SECS` self-stops a forgotten recording (safety cap).
   VB.recTask = hs.task.new(SOX, onRecDone, soxStream,
-    { "-d", "-S", "-r", "16000", "-c", "1", "-b", "16", VB.wav })
+    { "-d", "-S", "-r", "16000", "-c", "1", "-b", "16", VB.wav,
+      "trim", "0", tostring(MAX_RECORD_SECS) })
   VB.recTask:setEnvironment(TASK_ENV)
   if VB.recTask:start() then
     VB.recStart = os.time()
@@ -741,6 +750,20 @@ end
 function toggleDictate()
   if VB.state == "idle" then
     VB.captureFlags = nil           -- quick path uses config defaults
+    startRecording()
+  elseif VB.state == "recording" then
+    stopRecording()
+  else
+    hs.alert.show("Still working…", 0.8)
+  end
+end
+
+-- Transcribe-only: record and deliver the raw transcript, no LLM stage. Shares
+-- the single recording state with toggleDictate, so pressing either key while
+-- recording stops the same capture; only the FLAGS pinned at start differ.
+function toggleTranscribeOnly()
+  if VB.state == "idle" then
+    VB.captureFlags = { "--transcribe-only" }   -- pure transcript, no LLM
     startRecording()
   elseif VB.state == "recording" then
     stopRecording()
@@ -1279,6 +1302,7 @@ local function buildMenu(state, backend, actions, backends)
     { title = "-" },
     { title = "Open Alfred window", fn = actions.openWindow },
     { title = "Dictate (toggle)", fn = actions.toggleDictate },
+    { title = "Transcribe only", fn = actions.toggleTranscribeOnly },
     { title = "Dictate as…", fn = actions.dictateWithMode },
     { title = "Type…", fn = actions.typePrompt },
     { title = "Backend", menu = backendMenu },
@@ -1337,6 +1361,7 @@ VB.menubar:setMenu(function()
   return buildMenu(VB.state, VB.backend, {
     openWindow = function() openWindow() end,
     toggleDictate = toggleDictate,
+    toggleTranscribeOnly = toggleTranscribeOnly,
     dictateWithMode = dictateWithMode,
     typePrompt = typePrompt,
     setBackend = function(v) VB.backend = v end,
@@ -1366,6 +1391,7 @@ VB.hotkeys = {
   hs.hotkey.bind(INTENT_HOTKEY.mods, INTENT_HOTKEY.key, dictateWithMode),
   hs.hotkey.bind(TYPE_HOTKEY.mods, TYPE_HOTKEY.key, typePrompt),
   hs.hotkey.bind(WINDOW_HOTKEY.mods, WINDOW_HOTKEY.key, function() openWindow() end),
+  hs.hotkey.bind(RAWTX_HOTKEY.mods, RAWTX_HOTKEY.key, toggleTranscribeOnly),
 }
 
 refreshModes()      -- pull the (possibly customized) mode catalog from the engine
