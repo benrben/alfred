@@ -123,24 +123,101 @@ class CombinedPromptFolding(unittest.TestCase):
 
 
 class SplitForProcessing(unittest.TestCase):
+    """_split_for_processing returns [(chunk_text, starts_new_paragraph), ...] —
+    the flag is what lets process_text rejoin chunk outputs with the input's
+    original paragraph structure instead of flattening every boundary to a
+    space (see ChunkedProcessingPreservesParagraphs below)."""
+
     def test_short_text_is_one_chunk(self):
-        self.assertEqual(vb._split_for_processing("hi there", 100), ["hi there"])
+        self.assertEqual(vb._split_for_processing("hi there", 100),
+                         [("hi there", False)])
 
     def test_splits_on_sentence_bounds_under_budget(self):
         text = ". ".join(f"Sentence number {i}" for i in range(200)) + "."
         chunks = vb._split_for_processing(text, 300)
         self.assertGreater(len(chunks), 1)
-        self.assertTrue(all(len(c) <= 300 for c in chunks))
+        self.assertTrue(all(len(c) <= 300 for c, _ in chunks))
         # No text is dropped: every sentence's core survives somewhere.
-        joined = " ".join(chunks)
+        joined = " ".join(c for c, _ in chunks)
         self.assertIn("Sentence number 0", joined)
         self.assertIn("Sentence number 199", joined)
+        # One continuous paragraph split purely for size: only the (moot)
+        # first chunk is flagged; the rest are same-paragraph continuations.
+        self.assertEqual([starts for _, starts in chunks][1:],
+                         [False] * (len(chunks) - 1))
 
     def test_lone_oversized_sentence_is_hard_split(self):
         text = "x" * 1000  # no sentence break at all
         chunks = vb._split_for_processing(text, 250)
-        self.assertTrue(all(len(c) <= 250 for c in chunks))
-        self.assertEqual("".join(chunks), text)
+        self.assertTrue(all(len(c) <= 250 for c, _ in chunks))
+        self.assertEqual("".join(c for c, _ in chunks), text)
+
+    def test_paragraph_aligned_chunks_are_each_flagged(self):
+        # Each paragraph here is big enough to force its own chunk, so every
+        # chunk boundary coincides with a real paragraph break in the input.
+        para = ("Sentence one. Sentence two. Sentence three. " * 20).strip()
+        text = "\n\n".join([para] * 3)
+        chunks = vb._split_for_processing(text, len(para) + 50)
+        self.assertEqual(len(chunks), 3)
+        self.assertEqual([starts for _, starts in chunks], [True, True, True])
+
+    def test_short_paragraphs_packed_into_one_chunk_keep_blank_lines(self):
+        # Multiple whole paragraphs fit in a single chunk together: the blank
+        # line between them must survive INSIDE that one chunk's text too.
+        paras = [f"Paragraph {i} has a few short words in it." for i in range(4)]
+        text = "\n\n".join(paras)
+        budget = len(paras[0]) + 2 + len(paras[1]) + 5
+        chunks = vb._split_for_processing(text, budget)
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual(chunks[0][0], paras[0] + "\n\n" + paras[1])
+        self.assertEqual(chunks[1][0], paras[2] + "\n\n" + paras[3])
+
+
+class ChunkedProcessingPreservesParagraphs(unittest.TestCase):
+    """Regression: process_text's chunk-output join used to flatten EVERY
+    chunk boundary to a plain space, destroying paragraph structure on any
+    transcript long enough to need chunking — even when a boundary landed
+    exactly on a blank line in the original text. It must now rejoin with a
+    blank line there, and a plain space only where one paragraph was split
+    purely for size."""
+
+    def setUp(self):
+        self._orig_fallback = vb.run_llm_fallback
+        self._orig_cands = vb.candidate_backends
+        self._orig_budget = vb._chunk_char_budget
+        vb.candidate_backends = lambda cfg: ["fake"]
+        # An identity "LLM": echoes back exactly the chunk it was given, so the
+        # assertion is purely about process_text's OWN join logic.
+        vb.run_llm_fallback = lambda backends, prompt, cfg: (
+            prompt.split("INPUT TEXT:\n", 1)[1])
+
+    def tearDown(self):
+        vb.run_llm_fallback = self._orig_fallback
+        vb.candidate_backends = self._orig_cands
+        vb._chunk_char_budget = self._orig_budget
+
+    def test_paragraph_aligned_chunks_rejoin_with_blank_lines(self):
+        cfg = _cfg(rewrite=True, mode="notes", combine_stages=True)
+        para = ("Sentence one. Sentence two. Sentence three. " * 20).strip()
+        text = "\n\n".join([para] * 3)
+        # Force each paragraph into its own chunk (a real long dictation's
+        # paragraphs routinely land one-per-chunk against the real budget).
+        vb._chunk_char_budget = lambda c: len(para) + 50
+
+        out = vb.process_text(text, cfg)
+
+        self.assertEqual(out, text, "paragraph structure must survive intact")
+        self.assertEqual(out.count("\n\n"), 2)
+
+    def test_size_split_within_one_paragraph_rejoins_with_a_space(self):
+        cfg = _cfg(rewrite=True, mode="notes", combine_stages=True)
+        # A single continuous paragraph (no blank lines at all) long enough to
+        # force multiple chunks purely by size.
+        text = ("This is a spoken sentence in the meeting. " * 200).strip()
+        out = vb.process_text(text, cfg)
+
+        self.assertEqual(out, text)
+        self.assertNotIn("\n\n", out, "one paragraph split by size stays one")
 
 
 if __name__ == "__main__":

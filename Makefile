@@ -42,7 +42,7 @@ lint:
 	@echo "── luacheck ────────────────────────────────────"
 	-luacheck voicebridge.lua tests/lua/ 2>/dev/null || echo "(luacheck not installed — brew install luacheck)"
 	@echo "── eslint (raycast) ────────────────────────────"
-	-cd raycast && npm run lint
+	-cd raycast && npm run lint:eslint
 
 dev:
 	$(PIP) install -r requirements-dev.txt

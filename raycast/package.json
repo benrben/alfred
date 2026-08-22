@@ -136,6 +136,7 @@
     "@types/node": "22.19.17",
     "@types/react": "19.0.10",
     "eslint": "^8.57.0",
+    "eslint-plugin-react-hooks": "^4.6.2",
     "prettier": "^3.3.3",
     "typescript": "^5.5.4",
     "vitest": "^2.1.9"
@@ -144,6 +145,7 @@
     "build": "ray build -e dist",
     "dev": "ray develop",
     "lint": "ray lint",
+    "lint:eslint": "eslint src --ext .ts,.tsx",
     "fix-lint": "ray lint --fix",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"

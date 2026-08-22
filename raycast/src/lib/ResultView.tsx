@@ -104,7 +104,7 @@ function FeedbackForm({
   );
 }
 
-// A transcript/result screen with Paste / Copy, a "Reprocess as…" submenu that
+// A transcript/result screen with Paste / Copy, a "Reprocess As…" submenu that
 // re-runs the text through any format, and "Refine with feedback…" to adjust it
 // with a free-text instruction.
 export function ResultView({
@@ -176,7 +176,7 @@ export function ResultView({
             }
           />
           <ActionPanel.Submenu
-            title="Reprocess as…"
+            title="Reprocess As…"
             icon={Icon.Wand}
             shortcut={{ modifiers: ["cmd"], key: "r" }}
           >

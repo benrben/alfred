@@ -11,6 +11,7 @@ import {
 } from "@raycast/api";
 import { useEffect, useState } from "react";
 import {
+  BACKENDS,
   buildFormats,
   callEngine,
   CONFIG_FORMAT_ID,
@@ -162,9 +163,9 @@ export function PipelineForm({ prefillSelection }: PipelineFormProps) {
       </Form.Dropdown>
       <Form.Dropdown id="backend" title="LLM backend" defaultValue="default">
         <Form.Dropdown.Item value="default" title="Default (config)" />
-        <Form.Dropdown.Item value="auto" title="auto" />
-        <Form.Dropdown.Item value="claude" title="claude" />
-        <Form.Dropdown.Item value="codex" title="codex" />
+        {BACKENDS.map((b) => (
+          <Form.Dropdown.Item key={b} value={b} title={b} />
+        ))}
       </Form.Dropdown>
     </Form>
   );

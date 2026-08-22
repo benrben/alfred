@@ -8,7 +8,14 @@ import {
   popToRoot,
 } from "@raycast/api";
 import { spawn } from "node:child_process";
-import { closeSync, existsSync, fstatSync, openSync, readSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  openSync,
+  readSync,
+  unlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { useEffect, useRef, useState } from "react";
@@ -75,6 +82,18 @@ function tailFile(file: string, bytes = 8192): string {
 function readLevel(meterFile?: string): number {
   if (!meterFile) return 0;
   return parseLevel(tailFile(meterFile));
+}
+
+// Best-effort delete of a recording-session file (the .meter is Raycast-only —
+// the engine never touches it — and a cancelled/abandoned WAV that no
+// `stream-finish` will ever consume). Missing/already-gone is not an error.
+function removeIfPresent(path?: string): void {
+  if (!path) return;
+  try {
+    unlinkSync(path);
+  } catch {
+    // already gone / never existed
+  }
 }
 
 function waitForExit(pid: number, timeoutMs: number): Promise<void> {
@@ -164,6 +183,13 @@ export default function Dictate(props: {
         // already gone
       }
     }
+    if (stale) {
+      // Abandoned outright — no stream-finish will ever consume this WAV, so
+      // (unlike a normal stop) we must clean it up ourselves, alongside its
+      // Raycast-only .meter file.
+      removeIfPresent(stale.wav);
+      removeIfPresent(stale.meter);
+    }
     const stamp = Date.now();
     const wav = join(tmpdir(), `alfred_rec_${stamp}.wav`);
     const meter = join(tmpdir(), `alfred_rec_${stamp}.meter`);
@@ -244,7 +270,16 @@ export default function Dictate(props: {
     await waitForExit(st.pid, 4000);
     clearRecState();
     refreshMenuBar(); // clear the 🔴 indicator immediately
+    // The .meter is Raycast-only (the engine never reads it) and we're done
+    // reading it too (phase has left "recording") — clean it up. The WAV
+    // itself is NOT removed here: it's about to be handed to stream-finish,
+    // and the engine deletes it after transcribing (unless keep_audio).
+    removeIfPresent(st.meter);
     if (fileSize(st.wav) <= 1024) {
+      // No stream-finish call below means the engine never gets a chance to
+      // clean this WAV up (that only happens after it transcribes one) — do
+      // it ourselves so an empty/near-empty capture doesn't linger either.
+      removeIfPresent(st.wav);
       setError("Nothing recorded.");
       setPhase("error");
       return;
@@ -292,6 +327,10 @@ export default function Dictate(props: {
       }
       clearRecState();
       refreshMenuBar(); // clear the 🔴 indicator immediately
+      // A cancelled recording is never handed to the engine, so nothing else
+      // will ever delete this WAV (verbatim audio) or its .meter file.
+      removeIfPresent(st.wav);
+      removeIfPresent(st.meter);
     }
     closeMainWindow();
     popToRoot();

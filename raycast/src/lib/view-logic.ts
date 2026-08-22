@@ -166,7 +166,7 @@ export function initialBanner(args: {
   return path ? `💾 Saved to \`${path}\`` : (note ?? "");
 }
 
-/** Banner after a successful "Reprocess as…": format title, or raw note. */
+/** Banner after a successful "Reprocess As…": format title, or raw note. */
 export function reprocessBanner(fmt: FormatChoice): string {
   return fmt.ai ? `↻ Reprocessed as ${fmt.title}` : "↻ Raw transcript";
 }

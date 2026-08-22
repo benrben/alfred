@@ -543,6 +543,14 @@ export function defaultFormatId(settings: Settings | null): string {
   return p.mode || "raw";
 }
 
+/** The selectable LLM backends (besides "Default = use config"). ONE source
+ * feeding every picker (PipelineForm's dropdown here; the Hammerspoon
+ * front-end has its own equivalent list) so adding/renaming a backend can't
+ * silently drift out of sync with the engine's `--backend` choices again —
+ * "local" (the engine's actual default: on-device MLX, no login, no network)
+ * had dropped out of this form's dropdown before. */
+export const BACKENDS = ["auto", "claude", "codex", "local"] as const;
+
 /** Backend flag: explicit override, else preference (empty when "default"). */
 export function backendFlags(override?: string): string[] {
   const b = (override ?? getPrefs().backend ?? "default").trim();

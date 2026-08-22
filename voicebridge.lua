@@ -145,11 +145,14 @@ local DAEMON_URL = "http://127.0.0.1:" .. DAEMON_PORT .. "/"
 local ENV_PREFIX = "PATH='" .. USER_PATH .. "' HOME='" .. HOME ..
   "' LANG='en_US.UTF-8' LC_ALL='en_US.UTF-8' PYTHONUTF8=1 "
 -- The engine's owner-only (0700) state dir. Our debug trace + last-capture dump
--- live here — NOT in world-readable /tmp — because they can contain verbatim
--- dictation. Created on demand by ensureVBDir(); the engine also creates it.
-local VB_DIR    = HOME .. "/.voicebridge"
-local LOG_FILE  = VB_DIR .. "/voicebridge.log"
-local DUMP_FILE = VB_DIR .. "/voicebridge_last.txt"
+-- (AND the daemon's own stdout/stderr log, below) live here — NOT in
+-- world-readable /tmp — because every one of them can contain verbatim
+-- dictation (the daemon logs "transcript (…): <first 120 chars>" per capture).
+-- Created on demand by ensureVBDir(); the engine also creates it.
+local VB_DIR        = HOME .. "/.voicebridge"
+local LOG_FILE      = VB_DIR .. "/voicebridge.log"
+local DUMP_FILE     = VB_DIR .. "/voicebridge_last.txt"
+local DAEMON_LOG    = VB_DIR .. "/daemon.log"
 
 pcall(require, "hs.ipc")   -- enables the `hs` CLI for introspection
 
@@ -375,6 +378,9 @@ local ERROR_MESSAGES = {
   audio_not_found = "No audio to transcribe.",
   stt_failed      = "Transcription failed.",
   llm_failed      = "The rewrite step failed.",
+  -- The clipboard/paste/save-to-file step itself failed (e.g. an unwritable
+  -- save_dir). The text isn't lost — the engine keeps it in history first.
+  deliver_failed  = "Couldn't deliver the result (see History — it was saved there).",
   runtime         = "The engine hit an error.",
 }
 local function errorMessage(subtype, tail)
@@ -487,16 +493,28 @@ function onResult(code, out, err)
     -- No VB_STATUS line at all (a crash before the sentinel, or a foreign
     -- response): surface whatever stderr detail we have.
     notify("Alfred", "Error: " .. (r.tail or
-      "see the engine log (~/.voicebridge or /tmp/alfred_daemon.log)"))
+      "see the engine log (~/.voicebridge/daemon.log)"))
   end
+end
+
+-- Pure: the detached-launch shell command for the warm daemon, redirecting its
+-- stdout/stderr into `logFile`. Extracted so a test can assert that file is
+-- NEVER under /tmp: the daemon logs "transcript (…): <first 120 chars>" on
+-- every capture, so a world-readable /tmp log would leak verbatim dictation to
+-- any other local account. logFile must be under the owner-only (0700)
+-- ~/.voicebridge (ensureVBDir()) — sufficient on its own, since no other user
+-- can open a path through a 0700 directory regardless of the file's own mode.
+local function buildStartDaemonCmd(envPrefix, python, script, port, logFile)
+  return envPrefix .. "nohup '" .. python .. "' '" .. script ..
+    "' serve --port " .. port .. " >'" .. logFile .. "' 2>&1 &"
 end
 
 -- Launch the warm engine daemon, detached so it survives Hammerspoon reloads
 -- (keeping the Whisper model resident). Re-launching when one already runs is
 -- harmless: the new process finds the port busy and exits.
 function startDaemon()
-  hs.execute(ENV_PREFIX .. "nohup '" .. PYTHON .. "' '" .. SCRIPT ..
-    "' serve --port " .. DAEMON_PORT .. " >/tmp/alfred_daemon.log 2>&1 &")
+  ensureVBDir()
+  hs.execute(buildStartDaemonCmd(ENV_PREFIX, PYTHON, SCRIPT, DAEMON_PORT, DAEMON_LOG))
   dbg("startDaemon: launched detached on :" .. DAEMON_PORT)
 end
 
@@ -1336,7 +1354,9 @@ if os.getenv("VB_LUA_TEST") then
            -- engine-result pure logic
            resultPayload = resultPayload, classifyResult = classifyResult,
            errorMessage = errorMessage, resultBanner = resultBanner,
-           classifyPost = classifyPost, buildEngineArgv = buildEngineArgv }
+           classifyPost = classifyPost, buildEngineArgv = buildEngineArgv,
+           -- daemon-launch pure logic
+           buildStartDaemonCmd = buildStartDaemonCmd }
 end
 
 -- ---- Consume the engine contract (one fetch, cached) ---------------------

@@ -45,8 +45,15 @@ class _Capture:
     to end in memory: deliver records (text, kind), history/print are inert, and
     progress writes nowhere."""
 
+    def __init__(self, deliver_raises: Exception | None = None):
+        # Set to make the fake deliver() raise, so tests can assert the
+        # delivery-failure path (history still recorded, "deliver_failed"
+        # status) without touching real clipboard/file I/O.
+        self.deliver_raises = deliver_raises
+
     def __enter__(self):
         self.delivered = []          # list of (text, do_paste)
+        self.history = []            # list of (text, source) — history_append calls
         self.statuses = []           # list of status-line part tuples
         self.results = []            # list of VB_RESULT payloads (print_result)
         self._saves = {}
@@ -60,6 +67,8 @@ class _Capture:
         }
 
         def fake_deliver(text, cfg, do_paste, sink=None):
+            if self.deliver_raises is not None:
+                raise self.deliver_raises
             self.delivered.append((text, do_paste))
             return "copied", None, None      # (kind, path, paste_ok)
 
@@ -71,7 +80,8 @@ class _Capture:
         self._tmp = Path(tempfile.mkdtemp()) / "progress.json"
 
         vb.deliver = fake_deliver
-        vb.history_append = lambda *a, **k: None
+        vb.history_append = lambda text, cfg, source: self.history.append(
+            (text, source))
         vb.print_status = fake_status
         vb.print_result = lambda text: self.results.append(text)
         vb._progress_path = lambda: self._tmp
@@ -278,6 +288,47 @@ class CmdStreamLive(unittest.TestCase):
         self.assertTrue(first.stop)
         self.assertIsNot(vb._STREAMS[self.audio], first)
 
+    def test_timestamps_flag_discards_live_session_for_a_true_batch_transcribe(self):
+        # Regression: --timestamps used to be silently honoured only on the
+        # no-session batch path; against a LIVE session it was dropped with no
+        # warning, and even if wired in, each streamed chunk's Whisper segments
+        # restart their own clock at 0:00 (independent decode windows), so
+        # honouring it there would emit WRONG elapsed-time markers. A live
+        # session must be discarded and a real whole-file batch transcribe run
+        # instead whenever --timestamps is requested — but that batch call must
+        # still use the SESSION's config (base_cfg), not silently revert to
+        # fresh defaults: --language he was set at record-start time only, so a
+        # correct fallback still transcribes in Hebrew even though the
+        # --timestamps finish call itself repeats no --language.
+        vb.StreamSession = self._fake_session(text="SESSION TEXT (chunk-relative, wrong)")
+        seen = {}
+
+        def fake_tx(path, cfg, *, language, whisper_translate, timestamps=False):
+            seen["timestamps"] = timestamps
+            seen["path"] = path
+            seen["language"] = language
+            return "[0:00] batch transcript with real timestamps", "en"
+
+        orig_tx = vb.transcribe
+        vb.transcribe = fake_tx
+        orig_pt = vb.process_text
+        vb.process_text = lambda text, c: text
+        try:
+            with _Capture() as cap:
+                vb.cmd_stream_start(_ns(audio=self.audio, language="he"))
+                rc = vb.cmd_stream_finish(_ns(audio=self.audio, timestamps=True))
+        finally:
+            vb.process_text = orig_pt
+            vb.transcribe = orig_tx
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen, {"timestamps": True, "path": self.audio,
+                                "language": "he"})
+        self.assertEqual([t for t, _ in cap.delivered],
+                         ["[0:00] batch transcript with real timestamps"])
+        # The session was popped and stopped, not left dangling.
+        self.assertNotIn(self.audio, vb._STREAMS)
+
     def test_finish_time_format_override_reaches_process_text(self):
         # Record with defaults, then finish with --mode email: the finish-time
         # cfg (rewrite forced on by mode) must be what process_text sees.
@@ -355,3 +406,93 @@ class CmdTextRouting(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeliveryFailureIsRecoverable(unittest.TestCase):
+    """Regression: a delivery failure (clipboard write, unwritable save_dir,
+    ...) used to lose the capture outright — deliver() raised past
+    history_append(), which ran AFTER it, so nothing was ever recorded.
+    _deliver_and_report now appends to history BEFORE delivery, so the text
+    stays recoverable via `history --copy 0` even when delivery itself blows
+    up, and the caller sees a distinct "deliver_failed" status instead of a
+    bare crash."""
+
+    def _cfg(self, **proc):
+        cfg = vb.load_config(NO_CFG)
+        cfg["processing"].update(proc)
+        return cfg
+
+    def test_finish_capture_success_path_keeps_history_on_delivery_failure(self):
+        cfg = self._cfg(rewrite=True)
+        orig = vb.process_text
+        vb.process_text = lambda text, c: "PROCESSED:" + text
+        try:
+            with _Capture(deliver_raises=PermissionError("save_dir unwritable")) as cap:
+                rc = vb._finish_capture("hello", cfg, _ns(), vb._Progress())
+        finally:
+            vb.process_text = orig
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(cap.delivered, [])              # delivery never landed
+        # ... but the processed text was NOT lost — it's in history.
+        self.assertEqual(cap.history, [("PROCESSED:hello", "stt")])
+        self.assertEqual(cap.results, ["PROCESSED:hello"])
+        self.assertEqual(cap.last_status, ("error", "deliver_failed"))
+
+    def test_finish_capture_raw_fallback_keeps_history_on_delivery_failure(self):
+        # Both the LLM stage AND delivery fail in the same capture.
+        cfg = self._cfg(rewrite=True)
+        orig = vb.process_text
+        vb.process_text = lambda text, c: (_ for _ in ()).throw(
+            RuntimeError("backend exploded"))
+        try:
+            with _Capture(deliver_raises=OSError("clipboard busy")) as cap:
+                rc = vb._finish_capture("raw words here", cfg, _ns(), vb._Progress())
+        finally:
+            vb.process_text = orig
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(cap.delivered, [])
+        self.assertEqual(cap.history, [("raw words here", "stt")])
+        self.assertEqual(cap.results, ["raw words here"])
+        # Both failure suffixes are present: the deliver failure, then llm_failed.
+        self.assertEqual(cap.last_status, ("error", "deliver_failed", "llm_failed"))
+
+    def test_cmd_text_keeps_history_on_delivery_failure(self):
+        orig = vb.process_text
+        vb.process_text = lambda text, c: "P:" + text
+        try:
+            with _Capture(deliver_raises=PermissionError("boom")) as cap:
+                rc = vb.cmd_text(_ns(text="hello world", instruction=None))
+        finally:
+            vb.process_text = orig
+
+        self.assertEqual(rc, 1)
+        self.assertEqual(cap.delivered, [])
+        self.assertEqual(cap.history, [("P:hello world", "text")])
+        self.assertEqual(cap.last_status, ("error", "deliver_failed"))
+
+    def test_history_append_failure_does_not_block_delivery(self):
+        # Regression: history_append() itself failing (a disk-full or
+        # unwritable ~/.voicebridge — the exact class of error the
+        # deliver_failed fix above was written for) used to propagate straight
+        # out of _deliver_and_report UNCAUGHT, since it ran outside any
+        # try/except. That meant deliver() never even ran (no clipboard/paste/
+        # file at all) and progress.json was left stuck mid-flight forever.
+        # History is a secondary feature (the `history` command / --copy) and
+        # must never block the primary path: the actual delivery attempt.
+        cfg = self._cfg(rewrite=True)
+        orig_pt = vb.process_text
+        vb.process_text = lambda text, c: "PROCESSED:" + text
+        try:
+            with _Capture() as cap:
+                vb.history_append = lambda *a, **k: (_ for _ in ()).throw(
+                    OSError("disk full"))
+                rc = vb._finish_capture("hello", cfg, _ns(), vb._Progress())
+        finally:
+            vb.process_text = orig_pt
+
+        self.assertEqual(rc, 0)      # delivery still succeeded
+        self.assertEqual([t for t, _ in cap.delivered], ["PROCESSED:hello"])
+        self.assertEqual(cap.results, ["PROCESSED:hello"])
+        self.assertEqual(cap.last_status, ("copied",))

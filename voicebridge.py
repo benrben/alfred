@@ -49,7 +49,10 @@ import threading
 import time
 from pathlib import Path
 
-# Sentinel printed on stdout for the front-end to parse. Always the LAST line.
+# Sentinel printed on stdout for the front-end to parse. The LAST line of
+# every command a front-end actually drives — EXCEPT --stdout, which prints
+# only the final text (for scripting/piping) and skips VB_STATUS entirely; a
+# front-end caller never passes --stdout, so this holds for its whole contract.
 STATUS = "VB_STATUS"
 # Sentinel for the machine-readable result text, emitted (JSON-encoded, so it
 # survives newlines) on the line BEFORE the final VB_STATUS. Lets a front-end
@@ -128,6 +131,12 @@ DEFAULTS: dict = {
         "save_dir": "~/Documents/VoiceBridge",
         "save_format": "md",         # md|txt
         "keep_audio": False,         # delete the recording after transcription
+        # In paste mode, snapshot the user's prior clipboard and restore it
+        # after pasting, so dictation doesn't clobber whatever they had
+        # copied. Off by default: older front-ends still read the delivered
+        # text from the clipboard as a fallback (not VB_RESULT); enable once
+        # yours reads VB_RESULT.
+        "restore_clipboard": False,
     },
     "history": {
         "enabled": True,
@@ -191,7 +200,7 @@ CONTRACT: dict = {
             "error": ["subtype"],
         },
         "error_subtypes": ["audio_not_found", "stt_failed", "llm_failed",
-                           "runtime"],
+                           "deliver_failed", "runtime"],
         "llm_failed_suffix": "llm_failed",
         # A 'copied' status line may carry a trailing 'paste_failed' flag when
         # auto-paste was requested but the keystroke could not be delivered
@@ -794,6 +803,16 @@ def detect_backends() -> dict:
     return {"claude": find_tool("claude"), "codex": find_tool("codex")}
 
 
+def _should_prewarm_claude(cfg: dict) -> bool:
+    """Whether the daemon should spawn + prompt a warm claude session at
+    startup. Only 'claude' and 'auto' ever route to it (see _get_warm /
+    candidate_backends) — 'local' and 'codex' must never spawn or prompt a
+    claude process: local's whole point is that nothing leaves the machine,
+    and codex has no use for a claude session."""
+    return (bool(cfg["llm"].get("warm", True))
+            and cfg["llm"].get("backend") in ("claude", "auto"))
+
+
 def candidate_backends(cfg: dict) -> list[str]:
     """Ordered list of backends to try. 'local' is the in-process MLX model (no
     binary to find — availability is checked at call time). For 'auto' we return
@@ -1372,42 +1391,62 @@ def _chunk_char_budget(cfg: dict) -> int:
     return max(2000, int(max_tokens * 0.6 * _CHARS_PER_TOKEN))
 
 
-def _split_for_processing(text: str, max_chars: int) -> list[str]:
+def _split_for_processing(text: str, max_chars: int) -> list[tuple[str, bool]]:
     """Split `text` into <=max_chars chunks, breaking at paragraph then sentence
     boundaries so a chunk never cuts mid-sentence. A single over-long sentence is
     hard-split as a last resort. Returns [text] when it already fits (the common
-    case), so short captures make exactly one LLM call as before."""
+    case), so short captures make exactly one LLM call as before.
+
+    Each item is (chunk_text, starts_new_paragraph): the flag tells process_text
+    whether this chunk begins right after a blank-line break in the ORIGINAL
+    text (so its processed output should be rejoined to the previous chunk's
+    with a blank line) versus a paragraph merely having been split across chunks
+    for size (rejoin with a plain space — the two chunks are one paragraph).
+    Without this, every chunk boundary — including ones that landed exactly on a
+    paragraph break — got flattened to a single space, destroying the structure
+    of any transcript long enough to chunk."""
     if len(text) <= max_chars:
-        return [text]
-    # Prefer paragraph breaks, then sentences within a paragraph.
-    units: list[str] = []
+        return [(text, False)]
+    # Prefer paragraph breaks, then sentences within a paragraph. Each unit
+    # carries whether IT is the first unit of a (new) paragraph.
+    units: list[tuple[str, bool]] = []
     for para in text.split("\n\n"):
         para = para.strip()
         if not para:
             continue
+        starts_para = True
         if len(para) <= max_chars:
-            units.append(para)
+            units.append((para, starts_para))
             continue
         for sent in _SENT_SPLIT.split(para):
             sent = sent.strip()
             if not sent:
                 continue
             while len(sent) > max_chars:          # a lone huge sentence
-                units.append(sent[:max_chars])
+                units.append((sent[:max_chars], starts_para))
+                starts_para = False
                 sent = sent[max_chars:]
             if sent:
-                units.append(sent)
-    chunks: list[str] = []
+                units.append((sent, starts_para))
+                starts_para = False
+    chunks: list[tuple[str, bool]] = []
     cur = ""
-    for u in units:
-        if cur and len(cur) + 1 + len(u) > max_chars:
-            chunks.append(cur)
-            cur = u
+    cur_starts_para = False
+    for u, starts_para in units:
+        # A paragraph-start unit joins with a blank line (preserved WITHIN a
+        # chunk too, e.g. several short paragraphs packed into one call); a
+        # same-paragraph continuation joins with a plain space, as before.
+        sep = "\n\n" if (cur and starts_para) else " "
+        if cur and len(cur) + len(sep) + len(u) > max_chars:
+            chunks.append((cur, cur_starts_para))
+            cur, cur_starts_para = u, starts_para
         else:
-            cur = f"{cur} {u}" if cur else u
+            if not cur:
+                cur_starts_para = starts_para
+            cur = f"{cur}{sep}{u}" if cur else u
     if cur:
-        chunks.append(cur)
-    return chunks or [text]
+        chunks.append((cur, cur_starts_para))
+    return chunks or [(text, False)]
 
 
 def _process_chunk(text: str, cfg: dict, stages: dict, backends: list[str],
@@ -1438,10 +1477,22 @@ def process_text(text: str, cfg: dict) -> str:
 
     chunks = _split_for_processing(text, _chunk_char_budget(cfg))
     if len(chunks) == 1:
-        return _process_chunk(chunks[0], cfg, stages, backends, rewrite_instr)
-    parts = [_process_chunk(c, cfg, stages, backends, rewrite_instr)
-             for c in chunks]
-    return " ".join(p.strip() for p in parts if p and p.strip())
+        return _process_chunk(chunks[0][0], cfg, stages, backends, rewrite_instr)
+    # Rejoin chunk outputs with the SAME structure the input had: a blank line
+    # where the original text had one (starts_new_paragraph), a plain space
+    # where a single paragraph merely had to split across chunks for size.
+    result = ""
+    for chunk_text, starts_new_paragraph in chunks:
+        out = (_process_chunk(chunk_text, cfg, stages, backends, rewrite_instr)
+              or "").strip()
+        if not out:
+            continue
+        if not result:
+            result = out
+        else:
+            sep = "\n\n" if starts_new_paragraph else " "
+            result = f"{result}{sep}{out}"
+    return result
 
 
 def refine_text(text: str, instruction: str, cfg: dict) -> str:
@@ -1592,7 +1643,7 @@ def deliver(text: str, cfg: dict, do_paste: bool,
     clipboard first and restores it afterwards, so dictation doesn't destroy
     whatever they had copied (front-ends read the text from VB_RESULT, not the
     clipboard). Off by default for backward compatibility."""
-    sink = sink or MacosSink()
+    sink = sink or _SINK
     if not text.strip():
         return "empty", None, None
     threshold = int(cfg["output"]["size_threshold"])
@@ -1606,7 +1657,16 @@ def deliver(text: str, cfg: dict, do_paste: bool,
     sink.copy(text)
     paste_ok = sink.paste() is not False             # None (fake) -> treated ok
     if restore and paste_ok:
-        sink.restore(prior)
+        try:
+            sink.restore(prior)
+        except Exception as e:                        # noqa: BLE001
+            # Best-effort: putting the user's PRIOR clipboard back is a
+            # secondary nicety, not the delivery itself. The real work (copy +
+            # paste) already succeeded above; a restore failure must never
+            # retroactively turn that success into a reported error — the same
+            # class of bug the history_append guard in _deliver_and_report
+            # exists to prevent, one call away from this one.
+            sys.stderr.write(f"warning: clipboard restore failed: {e}\n")
     return "copied", None, paste_ok
 
 
@@ -1781,6 +1841,43 @@ def _apply_overrides(cfg: dict, args) -> dict:
     return cfg
 
 
+def _deliver_and_report(text: str, cfg: dict, source: str, *extra_status: str,
+                        prog: "_Progress | None" = None,
+                        done_label: str = "Done") -> int:
+    """Record history, then deliver, then report VB_STATUS — the shared tail
+    of every capture/text-processing path (process / stream-finish / text).
+
+    History is appended BEFORE delivery, so a delivery failure (clipboard
+    write, an unwritable save_dir, ...) can never lose the result outright: it
+    stays recoverable via `history --copy 0` even when the configured delivery
+    itself raises. History itself is best-effort: it's a SECONDARY feature (the
+    `history` command / --copy) and must never block the primary path — the
+    actual delivery attempt — the way a disk-full/unwritable-history-dir error
+    otherwise would, if it propagated straight out of this function. `extra_status`
+    carries trailing status suffixes from the caller (e.g. "llm_failed" from the
+    raw-transcript fallback); `prog` is the optional live-progress tracker
+    (`text` has none)."""
+    try:
+        history_append(text, cfg, source)
+    except Exception as e:                            # noqa: BLE001
+        sys.stderr.write(f"warning: history append failed: {e}\n")
+    try:
+        kind, path, paste_ok = deliver(text, cfg, cfg["output"]["mode"] == "paste")
+    except Exception as e:                            # noqa: BLE001
+        sys.stderr.write(f"error: delivery failed (kept in history): {e}\n")
+        if prog:
+            prog.done("error", "Delivery failed (kept in history)")
+        print_result(text)
+        print_status(*_status_parts("error", None, None, "deliver_failed",
+                                    *extra_status))
+        return 1
+    if prog:
+        prog.done("done", done_label)
+    print_result(text)
+    print_status(*_status_parts(kind, path, paste_ok, *extra_status))
+    return 0
+
+
 def _finish_capture(text: str, cfg: dict, args, prog: "_Progress") -> int:
     """Shared tail after transcription: LLM process -> deliver -> history ->
     VB_STATUS, with the resilient raw-transcript fallback. Used by `process`
@@ -1794,12 +1891,8 @@ def _finish_capture(text: str, cfg: dict, args, prog: "_Progress") -> int:
         # Resilient: still deliver the raw transcript so nothing is lost.
         sys.stderr.write(f"warning: LLM step failed, using raw transcript: {e}\n")
         prog.step("delivering", "LLM failed — delivering raw transcript")
-        kind, path, paste_ok = deliver(text, cfg, cfg["output"]["mode"] == "paste")
-        history_append(text, cfg, "stt")
-        prog.done("done", "Done (raw transcript)")
-        print_result(text)
-        print_status(*_status_parts(kind, path, paste_ok, "llm_failed"))
-        return 0
+        return _deliver_and_report(text, cfg, "stt", "llm_failed", prog=prog,
+                                   done_label="Done (raw transcript)")
 
     if getattr(args, "stdout", False):
         prog.done()
@@ -1807,12 +1900,7 @@ def _finish_capture(text: str, cfg: dict, args, prog: "_Progress") -> int:
         return 0
 
     prog.step("delivering", "Delivering")
-    kind, path, paste_ok = deliver(final, cfg, cfg["output"]["mode"] == "paste")
-    history_append(final, cfg, "stt")
-    prog.done()
-    print_result(final)
-    print_status(*_status_parts(kind, path, paste_ok))
-    return 0
+    return _deliver_and_report(final, cfg, "stt", prog=prog)
 
 
 def _maybe_remove_audio(audio: str, cfg: dict) -> None:
@@ -1900,10 +1988,24 @@ def cmd_stream_start(args) -> int:
 def cmd_stream_finish(args) -> int:
     """Stop the background transcription, transcribe the final tail, then run the
     LLM pipeline and deliver — the streaming counterpart of `process`. Falls back
-    to a full batch transcribe when there is no live session (daemon was down)."""
+    to a full batch transcribe when there is no live session (daemon was down),
+    or when --timestamps is requested: a streamed chunk's Whisper segments each
+    restart their own clock at 0:00 (every chunk is its own independent decode
+    window), so only a whole-file batch transcribe has real elapsed-time
+    segments — honouring the flag mid-stream would emit WRONG timestamps rather
+    than silently ignoring it."""
     prog = _Progress()
     with _STREAMS_LOCK:
         sess = _STREAMS.pop(args.audio, None)
+    want_timestamps = bool(getattr(args, "timestamps", None))
+    base_cfg = None
+    if sess is not None and want_timestamps:
+        base_cfg = sess.cfg          # keep the session's config; discard its text
+        try:
+            sess.finish()
+        except Exception as e:                        # noqa: BLE001
+            sys.stderr.write(f"warning: could not stop live stream session: {e}\n")
+        sess = None
     if sess is not None:
         cfg = _apply_overrides(sess.cfg, args)   # finish-time format/backend wins
         prog.step("transcribing", "Finishing transcription")
@@ -1916,15 +2018,14 @@ def cmd_stream_finish(args) -> int:
             print_status("error", "stt_failed")
             return 1
     else:
-        cfg = _apply_overrides(load_config(args.config), args)
+        cfg = _apply_overrides(base_cfg or load_config(args.config), args)
         wt = whisper_translate_active(cfg)
         prog.step("transcribing", "Transcribing audio")
         try:
             text, lang = transcribe(args.audio, cfg,
                                     language=cfg["stt"]["language"],
                                     whisper_translate=wt,
-                                    timestamps=bool(getattr(args, "timestamps",
-                                                            None)))
+                                    timestamps=want_timestamps)
         except Exception as e:                        # noqa: BLE001
             sys.stderr.write(f"error: transcription failed: {e}\n")
             _maybe_remove_audio(args.audio, cfg)
@@ -1958,11 +2059,7 @@ def cmd_text(args) -> int:
     if args.stdout:
         sys.stdout.write(final + "\n")
         return 0
-    kind, path, paste_ok = deliver(final, cfg, cfg["output"]["mode"] == "paste")
-    history_append(final, cfg, "text")
-    print_result(final)
-    print_status(*_status_parts(kind, path, paste_ok))
-    return 0
+    return _deliver_and_report(final, cfg, "text")
 
 
 def cmd_history(args) -> int:
@@ -2478,7 +2575,7 @@ def cmd_serve(args) -> int:
     def _prewarm():
         try:
             cfg = cfg0 if cfg0 is not None else load_config(args.config)
-            if cfg["llm"].get("warm", True) and cfg["llm"]["backend"] != "codex":
+            if _should_prewarm_claude(cfg):
                 warm = _get_warm(cfg, _clean_env(_CLAUDE_KEY_VARS))
                 if warm is not None:
                     warm.ask("Reply with exactly: ok", 60)
@@ -2698,8 +2795,9 @@ def main(argv=None) -> int:
     except Exception as e:                            # noqa: BLE001
         # Any failure (RuntimeError, a stray TOMLDecodeError/JSONDecodeError, …)
         # ends with a VB_STATUS line so the front-end never sees a bare traceback
-        # with no machine-readable status. The contract promise: the LAST line is
-        # always VB_STATUS.
+        # with no machine-readable status. The contract promise: VB_STATUS is the
+        # LAST line of every command a front-end drives — a front-end caller
+        # never passes --stdout, the one path that prints no VB_STATUS at all.
         sys.stderr.write(f"error: {e}\n")
         print_status("error", "runtime")
         return 1

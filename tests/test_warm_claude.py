@@ -103,5 +103,32 @@ class WarmClaudeLifecycle(unittest.TestCase):
             w._stop()
 
 
+class ShouldPrewarmClaude(unittest.TestCase):
+    """The daemon's startup pre-warm must never spawn/prompt `claude` for
+    'local' (strict-local: nothing leaves the machine) or 'codex' (no use for
+    a claude session) — only 'claude' and 'auto' route there. Regression for a
+    bug where the gate was `backend != "codex"`, so the shipped default
+    (backend = "local") still spawned and prompted claude on every daemon
+    start."""
+
+    def _cfg(self, backend, warm=True):
+        return {"llm": {"backend": backend, "warm": warm}}
+
+    def test_local_backend_never_prewarms(self):
+        self.assertFalse(vb._should_prewarm_claude(self._cfg("local")))
+
+    def test_codex_backend_never_prewarms(self):
+        self.assertFalse(vb._should_prewarm_claude(self._cfg("codex")))
+
+    def test_claude_backend_prewarms(self):
+        self.assertTrue(vb._should_prewarm_claude(self._cfg("claude")))
+
+    def test_auto_backend_prewarms(self):
+        self.assertTrue(vb._should_prewarm_claude(self._cfg("auto")))
+
+    def test_warm_disabled_never_prewarms(self):
+        self.assertFalse(vb._should_prewarm_claude(self._cfg("claude", warm=False)))
+
+
 if __name__ == "__main__":
     unittest.main()

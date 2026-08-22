@@ -349,6 +349,9 @@ do
   eq(H.errorMessage("audio_not_found", nil), "No audio to transcribe.", "errorMessage(audio_not_found)")
   eq(H.errorMessage("stt_failed", nil), "Transcription failed.", "errorMessage(stt_failed)")
   eq(H.errorMessage("llm_failed", nil), "The rewrite step failed.", "errorMessage(llm_failed)")
+  eq(H.errorMessage("deliver_failed", nil),
+     "Couldn't deliver the result (see History — it was saved there).",
+     "errorMessage(deliver_failed)")
   eq(H.errorMessage("runtime", nil), "The engine hit an error.", "errorMessage(runtime)")
   eq(H.errorMessage("weird_new_kind", nil), "Something went wrong.", "errorMessage(unknown) -> generic")
   eq(H.errorMessage("runtime", "boom: nope"), "The engine hit an error. (boom: nope)",
@@ -424,6 +427,14 @@ do
   eq(c7.kind, "error", "classify error kind")
   eq(c7.subtype, "stt_failed", "classify error subtype")
   eq(c7.tail, "error: transcription failed: boom", "classify error tail = last stderr line")
+
+  -- Compound error: delivery failed AFTER the LLM stage also failed (the
+  -- raw-transcript fallback whose own delivery then blew up) — subtype must
+  -- read parts[2] ("deliver_failed"), independent of the trailing llm_failed.
+  local c9 = H.classifyResult(1, "VB_STATUS\terror\tdeliver_failed\tllm_failed", "", decode)
+  eq(c9.kind, "error", "classify compound error kind")
+  eq(c9.subtype, "deliver_failed", "classify compound error subtype is deliver_failed, not llm_failed")
+  eq(c9.llmFailed, true, "classify compound error still detects the trailing llm_failed")
 
   -- No status line at all -> kind nil, tail still surfaced from stderr.
   local c8 = H.classifyResult(1, "just a traceback", "Traceback...\nValueError: x", decode)
@@ -512,6 +523,24 @@ do
   local nochars = H.parseHistory({ "hello" }, 30, function(l) return { text = l } end)
   eq(nochars[1].chars, 5, "parseHistory chars falls back to #text")
   eq(nochars[1].ts, "", "parseHistory ts falls back to ''")
+end
+
+-- =====================================================================
+-- buildStartDaemonCmd (daemon-launch): the daemon's stdout/stderr log must
+-- live under the owner-only ~/.voicebridge, never world-readable /tmp.
+-- Regression: startDaemon() used to redirect to /tmp/alfred_daemon.log, and
+-- the daemon logs "transcript (…): <first 120 chars>" on every capture — a
+-- verbatim-dictation leak to any other local account.
+-- =====================================================================
+do
+  local cmd = H.buildStartDaemonCmd("ENV_PREFIX ", "/path/.venv/bin/python3",
+    "/path/voicebridge.py", 8763, "/Users/x/.voicebridge/daemon.log")
+  check(cmd:find("/Users/x/.voicebridge/daemon.log", 1, true) ~= nil,
+    "buildStartDaemonCmd redirects into the given (owner-only) log file")
+  check(cmd:find("/tmp/", 1, true) == nil,
+    "buildStartDaemonCmd never references /tmp — that would be world-readable")
+  check(cmd:find("nohup", 1, true) ~= nil, "buildStartDaemonCmd still detaches via nohup")
+  check(cmd:find("8763", 1, true) ~= nil, "buildStartDaemonCmd carries the port")
 end
 
 -- ---- summary -------------------------------------------------------------

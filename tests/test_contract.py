@@ -73,7 +73,7 @@ class ContractShape(unittest.TestCase):
         self.assertEqual(s["kinds"]["error"], ["subtype"])
         self.assertEqual(s["error_subtypes"],
                          ["audio_not_found", "stt_failed", "llm_failed",
-                          "runtime"])
+                          "deliver_failed", "runtime"])
         self.assertEqual(s["llm_failed_suffix"], "llm_failed")
         self.assertEqual(s["paste_failed_suffix"], "paste_failed")
         self.assertEqual(s["result_sentinel"], "VB_RESULT")

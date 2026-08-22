@@ -129,6 +129,35 @@ class DeliverRouting(unittest.TestCase):
         self.assertEqual(sink.copied, ["new text"])   # result copied for the paste
         self.assertEqual(sink.restored, ["PRIOR"])    # user's clipboard restored
 
+    def test_restore_clipboard_failure_does_not_invalidate_a_successful_paste(self):
+        # Regression: sink.restore() (putting the user's PRIOR clipboard back)
+        # ran unguarded — if it raised, the exception unwound straight out of
+        # deliver(), past the "copied" return that already happened, so an
+        # already-successful copy+paste was reported as a crash/deliver_failed
+        # instead of the success it actually was. Restoring the prior
+        # clipboard is a secondary nicety, not the delivery itself, and must
+        # never retroactively invalidate delivery that already succeeded.
+        class RaisingRestoreSink(FakeSink):
+            def snapshot(self):
+                return "PRIOR"
+            def restore(self, data):
+                raise OSError("pbcopy busy")
+        sink = RaisingRestoreSink()
+        kind, path, paste_ok = vb.deliver(
+            "new text", _cfg(size_threshold=2000, restore_clipboard=True),
+            True, sink=sink)
+        self.assertEqual((kind, path, paste_ok), ("copied", None, True))
+        self.assertEqual(sink.copied, ["new text"])   # the real work still happened
+
+    def test_restore_clipboard_is_a_declared_default_not_just_documented(self):
+        # restore_clipboard is documented in config.example.toml but used to be
+        # absent from DEFAULTS — every other [output] option lives there, which
+        # is what makes DEFAULTS the actual config surface (settings/doctor/etc
+        # can introspect it; a bare .get(..., False) elsewhere can't be told
+        # apart from a typo'd key).
+        self.assertIn("restore_clipboard", vb.DEFAULTS["output"])
+        self.assertIs(vb.DEFAULTS["output"]["restore_clipboard"], False)
+
     def test_saved_path_uses_configured_format_and_dir(self):
         sink = FakeSink()
         cfg = _cfg(size_threshold=10, save_dir="/tmp/vb-test-out",

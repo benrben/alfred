@@ -168,6 +168,20 @@ describe("buildFormats / flagsForFormat", () => {
   });
 });
 
+describe("BACKENDS", () => {
+  it("matches the engine's actual --backend choices, including 'local'", async () => {
+    // Regression: PipelineForm's dropdown once hardcoded auto/claude/codex and
+    // silently dropped "local" — the engine's actual default (on-device MLX,
+    // no login, no network) — so the form could never select it. BACKENDS is
+    // the one list every picker (here and the Hammerspoon front-end) draws
+    // from now, so this single assertion guards them all.
+    const { engine } = await freshEngine();
+    expect(new Set(engine.BACKENDS)).toEqual(
+      new Set(["local", "auto", "claude", "codex"]),
+    );
+  });
+});
+
 describe("resolveDelivery", () => {
   it("copied -> reads the clipboard text (no VB_RESULT)", async () => {
     const { engine, stub } = await freshEngine();
@@ -263,6 +277,23 @@ describe("resolveDelivery", () => {
       llmFailed: false,
       pasteFailed: false,
     });
+  });
+
+  it("compound error (deliver_failed + llm_failed) is still classified as error, llmFailed detected", async () => {
+    // The raw-transcript fallback whose OWN delivery then also failed emits a
+    // 3-part status line: error, deliver_failed, llm_failed. resolveDelivery
+    // doesn't expose the subtype (callers show the generic engineErrorExcerpt
+    // instead), but kind/llmFailed/pasteFailed must still classify correctly.
+    const { engine } = await freshEngine();
+    const res = {
+      code: 1,
+      out: "VB_STATUS\terror\tdeliver_failed\tllm_failed",
+      err: "error: delivery failed (kept in history): disk full",
+    };
+    const d = await engine.resolveDelivery(res);
+    expect(d.kind).toBe("error");
+    expect(d.llmFailed).toBe(true);
+    expect(d.pasteFailed).toBe(false);
   });
 });
 

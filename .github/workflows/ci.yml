@@ -54,5 +54,10 @@ jobs:
           cache: npm
           cache-dependency-path: raycast/package-lock.json
       - run: npm ci
+      # Bare eslint, not `npm run lint` (= `ray lint`): that also validates the
+      # package.json author/icons against Raycast's store API, which needs
+      # network + a registered account and isn't a code-quality signal.
+      - name: Lint (eslint)
+        run: npm run lint:eslint
       - run: npm run typecheck
       - run: npx --no-install vitest run
