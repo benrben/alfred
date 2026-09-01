@@ -241,8 +241,10 @@ reads a token — it just uses the CLI you already authenticated.
 ## Files
 
 ```
-voicebridge.py          engine / CLI
-voicebridge.lua         Hammerspoon front-end
+voicebridge.py          entry-point shim (`python3 voicebridge.py ...`)
+voicebridge/            the engine / CLI package
+voicebridge.lua         Hammerspoon front-end (entry point + shared config/state)
+voicebridge_lua/        HUD/engine/capture/window sections voicebridge.lua loads
 raycast/                Raycast extension (second front-end)
 config.example.toml     all settings, documented
 requirements.txt        Python deps (floating intent)
@@ -265,6 +267,22 @@ make lint     # ruff + luacheck + eslint
 Or individually: `make test-py`, `make test-lua`, `make test-ts`. CI
 (`.github/workflows/ci.yml`) runs all three on every push/PR — on plain Ubuntu,
 since the suites stub the MLX models (no Apple-Silicon wheels needed).
+
+### Quality gate
+
+Beyond `make test`/`make lint`, the repository carries a per-function quality
+gate (coverage, complexity, CRAAP, file size, dead code, module boundaries, a
+smoke start of the daemon) driven by the `code-discipline` skill. Its
+configuration lives in `.quality/` (`quality-gate.json` = commands,
+`quality-thresholds.json` = every numeric goal, `quality-dependencies.json` =
+the intended architecture). Tools are ordinary dev dependencies
+(`requirements-dev.txt`, `raycast/package.json`, plus `luacheck`/`luacov` from
+Homebrew + luarocks for the Hammerspoon side).
+
+```bash
+make quality        # fast pass over your local changes; read the "To fix" list
+make quality-ship   # the ship report: every gate, must be green before handoff
+```
 
 ### Front-end ↔ engine compatibility
 

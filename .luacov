@@ -1,0 +1,13 @@
+-- luacov configuration: Lua line coverage for the repository quality gate.
+-- `VB_LUA_TEST=1 lua -lluacov tests/lua/test_helpers.lua` records hits, then
+-- `luacov -r lcov` writes LCOV (luacov-reporter-lcov) for the gate to merge.
+return {
+  statsfile = ".quality/coverage/lua/luacov.stats.out",
+  reportfile = ".quality/coverage/lua/lcov.info",
+  -- Matches voicebridge.lua and every voicebridge_lua/*.lua split file;
+  -- luacov normalizes away the .lua extension before matching, so a plain
+  -- "voicebridge" substring (not the old "voicebridge$" exact-name anchor)
+  -- is what catches both.
+  include = { "voicebridge" },
+  deletestats = true,
+}

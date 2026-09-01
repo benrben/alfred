@@ -5,3 +5,9 @@
 # needs nothing here; pytest just gives nicer output and is what the docs/CI use.
 pytest>=8,<10
 ruff>=0.6
+# Quality-gate analyzers (see .quality/quality-gate.json): per-function coverage,
+# static types, dead code, and complexity for the non-Python front-ends.
+coverage>=7
+mypy>=1
+vulture>=2
+lizard>=1.17

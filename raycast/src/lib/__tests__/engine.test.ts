@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 type Engine = typeof import("../engine");
 type Stub = typeof import("./raycast-api.stub");
@@ -23,6 +25,7 @@ async function freshEngine(): Promise<{ engine: Engine; stub: Stub }> {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 // The CONTRACT fixture the engine emits (from GET /contract or the `contract`
@@ -182,6 +185,337 @@ describe("BACKENDS", () => {
   });
 });
 
+describe("loadModes", () => {
+  it("returns the parsed array from the engine", async () => {
+    const { engine } = await freshEngine();
+    const contract = await import("../engine-contract");
+    vi.spyOn(contract, "callEngine").mockResolvedValue({
+      code: 0,
+      out: JSON.stringify([
+        { key: "email", label: "Email", description: "d", prompt: "p" },
+      ]),
+      err: "",
+    });
+    expect(await engine.loadModes()).toEqual([
+      { key: "email", label: "Email", description: "d", prompt: "p" },
+    ]);
+  });
+
+  it("returns [] when the engine's output isn't valid JSON", async () => {
+    const { engine } = await freshEngine();
+    const contract = await import("../engine-contract");
+    vi.spyOn(contract, "callEngine").mockResolvedValue({
+      code: 0,
+      out: "not json",
+      err: "",
+    });
+    expect(await engine.loadModes()).toEqual([]);
+  });
+
+  it("returns [] when the engine's output is valid JSON but not an array", async () => {
+    const { engine } = await freshEngine();
+    const contract = await import("../engine-contract");
+    vi.spyOn(contract, "callEngine").mockResolvedValue({
+      code: 0,
+      out: JSON.stringify({ not: "an array" }),
+      err: "",
+    });
+    expect(await engine.loadModes()).toEqual([]);
+  });
+});
+
+describe("loadSettings", () => {
+  const settings = {
+    backend: "auto",
+    claude_model: "sonnet",
+    codex_model: "",
+    claude_models: [],
+    codex_models: [],
+    processing: {
+      mode: "email",
+      rewrite: true,
+      translate: false,
+      optimize: false,
+      translate_via: "",
+    },
+  };
+
+  it("returns the parsed settings object", async () => {
+    const { engine } = await freshEngine();
+    const contract = await import("../engine-contract");
+    vi.spyOn(contract, "callEngine").mockResolvedValue({
+      code: 0,
+      out: JSON.stringify(settings),
+      err: "",
+    });
+    expect(await engine.loadSettings()).toEqual(settings);
+  });
+
+  it("returns null when the engine's output isn't valid JSON", async () => {
+    const { engine } = await freshEngine();
+    const contract = await import("../engine-contract");
+    vi.spyOn(contract, "callEngine").mockResolvedValue({
+      code: 0,
+      out: "not json",
+      err: "",
+    });
+    expect(await engine.loadSettings()).toBeNull();
+  });
+});
+
+describe("defaultFormatId", () => {
+  const withProcessing = (
+    over: Partial<{ mode: string; rewrite: boolean }>,
+  ) => ({
+    backend: "default",
+    claude_model: "",
+    codex_model: "",
+    claude_models: [],
+    codex_models: [],
+    processing: {
+      mode: "email",
+      rewrite: true,
+      translate: false,
+      optimize: false,
+      translate_via: "",
+      ...over,
+    },
+  });
+
+  it("returns RAW when settings are null", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.defaultFormatId(null)).toBe(engine.RAW_FORMAT_ID);
+  });
+
+  it("returns RAW when rewrite is off", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.defaultFormatId(withProcessing({ rewrite: false }))).toBe(
+      engine.RAW_FORMAT_ID,
+    );
+  });
+
+  it("returns the configured mode when rewrite is on", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.defaultFormatId(withProcessing({ mode: "email" }))).toBe(
+      "email",
+    );
+  });
+
+  it("falls back to 'raw' when rewrite is on but mode is empty", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.defaultFormatId(withProcessing({ mode: "" }))).toBe("raw");
+  });
+});
+
+describe("normalizeBackend", () => {
+  it("accepts every known backend unchanged", async () => {
+    const { engine } = await freshEngine();
+    for (const b of engine.BACKENDS) {
+      expect(engine.normalizeBackend(b)).toBe(b);
+    }
+  });
+
+  it("accepts 'default' unchanged", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.normalizeBackend("default")).toBe("default");
+  });
+
+  it("falls back to 'default' for an unrecognised value", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.normalizeBackend("bogus")).toBe("default");
+  });
+
+  it("falls back to 'default' when no value is given", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.normalizeBackend(undefined)).toBe("default");
+  });
+});
+
+describe("normalizeTranslate", () => {
+  it("accepts 'on', 'off' and 'default' unchanged", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.normalizeTranslate("on")).toBe("on");
+    expect(engine.normalizeTranslate("off")).toBe("off");
+    expect(engine.normalizeTranslate("default")).toBe("default");
+  });
+
+  it("falls back to 'default' for an unrecognised value", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.normalizeTranslate("bogus")).toBe("default");
+  });
+
+  it("falls back to 'default' when no value is given", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.normalizeTranslate(undefined)).toBe("default");
+  });
+});
+
+describe("setDefaultFormat", () => {
+  it("persists a raw format with --no-rewrite and reports success", async () => {
+    const { engine } = await freshEngine();
+    const contract = await import("../engine-contract");
+    const spy = vi
+      .spyOn(contract, "callEngine")
+      .mockResolvedValue({ code: 0, out: "saved", err: "" });
+    const ok = await engine.setDefaultFormat(engine.rawFormat());
+    expect(spy).toHaveBeenCalledWith([
+      "set-processing",
+      "--mode",
+      "raw",
+      "--no-rewrite",
+    ]);
+    expect(ok).toBe(true);
+  });
+
+  it("persists a mode format with --rewrite and reports failure when not saved", async () => {
+    const { engine } = await freshEngine();
+    const contract = await import("../engine-contract");
+    const spy = vi
+      .spyOn(contract, "callEngine")
+      .mockResolvedValue({ code: 0, out: "", err: "" });
+    const fmt = engine.buildFormats([
+      { key: "email", label: "Email", description: "", prompt: "" },
+    ])[2];
+    const ok = await engine.setDefaultFormat(fmt);
+    expect(spy).toHaveBeenCalledWith([
+      "set-processing",
+      "--mode",
+      "email",
+      "--rewrite",
+    ]);
+    expect(ok).toBe(false);
+  });
+});
+
+describe("engineEnv", () => {
+  it("restores Codex lookup paths and its default auth home", async () => {
+    const { engine } = await freshEngine();
+    vi.stubEnv("PATH", "/raycast/bin");
+    vi.stubEnv("CODEX_HOME", "");
+
+    const env = engine.engineEnv();
+    const pathEntries = env.PATH?.split(":") ?? [];
+
+    expect(pathEntries[0]).toBe("/raycast/bin");
+    expect(pathEntries).toContain(join(homedir(), ".codex/bin"));
+    expect(pathEntries).toContain(
+      join(homedir(), ".codex/packages/standalone/current/bin"),
+    );
+    expect(env.HOME).toBe(homedir());
+    expect(env.CODEX_HOME).toBe(join(homedir(), ".codex"));
+  });
+
+  it("preserves an explicitly configured CODEX_HOME", async () => {
+    const { engine } = await freshEngine();
+    vi.stubEnv("CODEX_HOME", "/custom/codex-home");
+
+    expect(engine.engineEnv().CODEX_HOME).toBe("/custom/codex-home");
+  });
+
+  it("falls back to userInfo()/defaults when USER, LOGNAME, LANG and LC_ALL are unset", async () => {
+    const { engine } = await freshEngine();
+    vi.stubEnv("USER", "");
+    vi.stubEnv("LOGNAME", "");
+    vi.stubEnv("LANG", "");
+    vi.stubEnv("LC_ALL", "");
+
+    const env = engine.engineEnv();
+    expect(env.USER).toBe(userInfo().username);
+    expect(env.LOGNAME).toBe(userInfo().username);
+    expect(env.LANG).toBe("en_US.UTF-8");
+    expect(env.LC_ALL).toBe("en_US.UTF-8");
+    expect(env.PYTHONUTF8).toBe("1");
+  });
+
+  it("passes through explicitly configured USER/LOGNAME/LANG/LC_ALL", async () => {
+    const { engine } = await freshEngine();
+    vi.stubEnv("USER", "alice");
+    vi.stubEnv("LOGNAME", "alice-log");
+    vi.stubEnv("LANG", "fr_FR.UTF-8");
+    vi.stubEnv("LC_ALL", "fr_FR.UTF-8");
+
+    const env = engine.engineEnv();
+    expect(env.USER).toBe("alice");
+    expect(env.LOGNAME).toBe("alice-log");
+    expect(env.LANG).toBe("fr_FR.UTF-8");
+    expect(env.LC_ALL).toBe("fr_FR.UTF-8");
+  });
+});
+
+describe("resolveScript / candidateScripts", () => {
+  it("prefers the configured engineScript path when it exists", async () => {
+    const { engine, stub } = await freshEngine();
+    const dir = mkdtempSync(join(tmpdir(), "alfred-script-"));
+    const script = join(dir, "voicebridge.py");
+    writeFileSync(script, "# stub");
+    stub.mockPrefs.engineScript = script;
+
+    expect(engine.resolveScript()).toBe(script);
+  });
+
+  it("skips a non-existent candidate and finds the next known location under HOME", async () => {
+    const { engine, stub } = await freshEngine();
+    const home = mkdtempSync(join(tmpdir(), "alfred-home-"));
+    // Only the *second* known candidate ("alfred/voicebridge.py") exists here;
+    // the first ("Claude/Projects/alfred/voicebridge.py") is left absent, so
+    // resolveScript() must skip it and keep scanning.
+    mkdirSync(join(home, "alfred"), { recursive: true });
+    const found = join(home, "alfred", "voicebridge.py");
+    writeFileSync(found, "# stub");
+    vi.stubEnv("HOME", home);
+    stub.mockPrefs.engineScript = "";
+
+    expect(engine.resolveScript()).toBe(found);
+    expect(
+      existsSync(join(home, "Claude/Projects/alfred/voicebridge.py")),
+    ).toBe(false);
+  });
+
+  it("falls back to the first known candidate path when nothing exists", async () => {
+    const { engine, stub } = await freshEngine();
+    const home = mkdtempSync(join(tmpdir(), "alfred-home-empty-"));
+    vi.stubEnv("HOME", home);
+    stub.mockPrefs.engineScript = "";
+
+    expect(engine.resolveScript()).toBe(
+      join(home, "Claude/Projects/alfred/voicebridge.py"),
+    );
+  });
+});
+
+describe("resolvePython", () => {
+  it("uses the configured pythonBin when it exists", async () => {
+    const { engine, stub } = await freshEngine();
+    const dir = mkdtempSync(join(tmpdir(), "alfred-py-"));
+    const py = join(dir, "python3");
+    writeFileSync(py, "#!/bin/sh");
+    stub.mockPrefs.pythonBin = py;
+
+    expect(engine.resolvePython(join(dir, "voicebridge.py"))).toBe(py);
+  });
+
+  it("falls through to the venv beside the script when pythonBin is missing", async () => {
+    const { engine, stub } = await freshEngine();
+    const dir = mkdtempSync(join(tmpdir(), "alfred-py-missing-"));
+    stub.mockPrefs.pythonBin = join(dir, "no-such-python");
+
+    const venvDir = join(dir, ".venv", "bin");
+    mkdirSync(venvDir, { recursive: true });
+    const venvPy = join(venvDir, "python3");
+    writeFileSync(venvPy, "#!/bin/sh");
+
+    expect(engine.resolvePython(join(dir, "voicebridge.py"))).toBe(venvPy);
+  });
+
+  it("falls back to the literal 'python3' when neither pythonBin nor a venv exist", async () => {
+    const { engine, stub } = await freshEngine();
+    const dir = mkdtempSync(join(tmpdir(), "alfred-py-none-"));
+    stub.mockPrefs.pythonBin = "";
+
+    expect(engine.resolvePython(join(dir, "voicebridge.py"))).toBe("python3");
+  });
+});
+
 describe("resolveDelivery", () => {
   it("copied -> reads the clipboard text (no VB_RESULT)", async () => {
     const { engine, stub } = await freshEngine();
@@ -279,6 +613,18 @@ describe("resolveDelivery", () => {
     });
   });
 
+  it("saved -> an existing but unreadable path (e.g. a directory) is treated as no text", async () => {
+    const { engine } = await freshEngine();
+    // A directory exists (existsSync -> true) but readFileSync on it throws
+    // (EISDIR); the caught error must fall through to "no text", not throw.
+    const dir = mkdtempSync(join(tmpdir(), "alfred-saved-dir-"));
+    const res = { code: 0, out: `VB_STATUS\tsaved\t${dir}`, err: "" };
+    const d = await engine.resolveDelivery(res);
+    expect(d.kind).toBe("saved");
+    expect(d.path).toBe(dir);
+    expect(d.text).toBeUndefined();
+  });
+
   it("compound error (deliver_failed + llm_failed) is still classified as error, llmFailed detected", async () => {
     // The raw-transcript fallback whose OWN delivery then also failed emits a
     // 3-part status line: error, deliver_failed, llm_failed. resolveDelivery
@@ -312,6 +658,30 @@ describe("parseResult", () => {
   it("returns null on a malformed (non-JSON) result payload", async () => {
     const { engine } = await freshEngine();
     expect(engine.parseResult("VB_RESULT\tnot json")).toBeNull();
+  });
+});
+
+describe("lastErrorLine", () => {
+  it("returns the last non-empty, trimmed stderr line", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.lastErrorLine("first warning\n  real error  \n")).toBe(
+      "real error",
+    );
+  });
+
+  it("skips blank lines when picking the last one (filter callback: true then false)", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.lastErrorLine("real error\n\n   \n")).toBe("real error");
+  });
+
+  it("falls back to 'unknown error' when there's nothing but blank lines", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.lastErrorLine("\n   \n")).toBe("unknown error");
+  });
+
+  it("falls back to 'unknown error' for empty input", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.lastErrorLine("")).toBe("unknown error");
   });
 });
 

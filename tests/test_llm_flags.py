@@ -49,6 +49,23 @@ class ReasoningEffortFlags(unittest.TestCase):
         self.assertIn("--effort", captured["cmd"])
         self.assertEqual(captured["cmd"][captured["cmd"].index("--effort") + 1], "low")
 
+    def test_claude_oneshot_cmd_omits_model_effort_and_fast_when_disabled(self):
+        captured = {}
+
+        def fake_run_llm_clean(cmd, env, timeout):
+            captured["cmd"] = cmd
+            return "ok"
+        orig = vb.run_llm_clean
+        vb.run_llm_clean = fake_run_llm_clean
+        try:
+            vb.run_llm("claude", "hi", cfg(claude_model="", claude_effort="", fast=False))
+        finally:
+            vb.run_llm_clean = orig
+        cmd = captured["cmd"]
+        self.assertNotIn("--model", cmd)
+        self.assertNotIn("--effort", cmd)
+        self.assertNotIn("--strict-mcp-config", cmd)
+
     def test_codex_cmd_has_reasoning_effort(self):
         captured = {}
         orig = vb.run_llm_clean
@@ -70,6 +87,18 @@ class ReasoningEffortFlags(unittest.TestCase):
         finally:
             vb.run_llm_clean = orig
         self.assertNotIn("-c", captured["cmd"])
+
+    def test_codex_cmd_has_model_when_set(self):
+        captured = {}
+        orig = vb.run_llm_clean
+        vb.run_llm_clean = lambda cmd, env, timeout: captured.setdefault("cmd", cmd) or "ok"
+        try:
+            vb.run_llm("codex", "hi", cfg(codex_model="gpt-5"))
+        finally:
+            vb.run_llm_clean = orig
+        cmd = captured["cmd"]
+        self.assertIn("-m", cmd)
+        self.assertEqual(cmd[cmd.index("-m") + 1], "gpt-5")
 
 
 class RefineFeedback(unittest.TestCase):

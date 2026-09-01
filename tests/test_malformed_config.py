@@ -51,6 +51,25 @@ class MalformedConfig(unittest.TestCase):
         self.assertNotIn("_config_error", cfg)
         self.assertIn("_loaded_from", cfg)
 
+    def test_missing_tomllib_falls_back_to_defaults(self):
+        # Simulate Python < 3.11 (no tomllib) the same way the stdlib import
+        # machinery reports it: `sys.modules[name] = None` makes any later
+        # `import name` raise ModuleNotFoundError.
+        good = self._write('[llm]\nbackend = "claude"\n')
+        saved = sys.modules.get("tomllib")
+        sys.modules["tomllib"] = None
+        try:
+            cfg = vb.load_config(good)
+        finally:
+            if saved is None:
+                del sys.modules["tomllib"]
+            else:
+                sys.modules["tomllib"] = saved
+        # Fell back to defaults (didn't crash) and didn't pretend the file loaded.
+        self.assertEqual(cfg["llm"]["backend"], vb.DEFAULTS["llm"]["backend"])
+        self.assertNotIn("_loaded_from", cfg)
+        self.assertNotIn("_config_error", cfg)
+
 
 class HistorySkipsCorruptLines(unittest.TestCase):
     def test_cmd_history_skips_bad_jsonl_line(self):

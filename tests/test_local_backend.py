@@ -17,6 +17,7 @@ Run: ./.venv/bin/python -m unittest discover -s tests
 import os
 import sys
 import time
+import types
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -125,6 +126,82 @@ class LocalBackend(unittest.TestCase):
             self.skipTest("mlx-lm is installed; missing-dep path not exercised")
         with self.assertRaises(RuntimeError):
             vb.run_local_llm("a", self._cfg())
+
+
+class LocalLoadAndGenerate(unittest.TestCase):
+    """Direct tests of the two real model-touching seams (_local_load /
+    _local_generate) that LocalBackend replaces with fakes for every other
+    test. mlx_lm itself is stubbed via sys.modules -- the same technique other
+    test files use to stub mlx_whisper -- so no real model download is needed,
+    and this runs the same whether or not mlx-lm happens to be installed."""
+
+    def setUp(self):
+        self._orig_mlx_lm = sys.modules.get("mlx_lm")
+
+    def tearDown(self):
+        if self._orig_mlx_lm is None:
+            sys.modules.pop("mlx_lm", None)
+        else:
+            sys.modules["mlx_lm"] = self._orig_mlx_lm
+
+    def test_local_load_calls_mlx_lm_load(self):
+        calls = []
+        fake = types.ModuleType("mlx_lm")
+        fake.load = lambda model_id: calls.append(model_id) or ("MODEL", "TOK")
+        sys.modules["mlx_lm"] = fake
+        self.assertEqual(vb._local_load("some/model"), ("MODEL", "TOK"))
+        self.assertEqual(calls, ["some/model"])
+
+    def test_local_load_missing_dependency_gives_clear_error(self):
+        # Force `from mlx_lm import load` to raise ModuleNotFoundError
+        # deterministically, regardless of whether mlx-lm happens to be
+        # installed in this environment (unlike test_missing_mlx_lm_gives_
+        # clear_error above, which can only exercise this when it's absent).
+        class BlockMlxLm:
+            def find_spec(self, name, path, target=None):
+                if name == "mlx_lm" or name.startswith("mlx_lm."):
+                    raise ModuleNotFoundError(f"No module named {name!r}")
+                return None
+
+        sys.modules.pop("mlx_lm", None)
+        blocker = BlockMlxLm()
+        sys.meta_path.insert(0, blocker)
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                vb._local_load("some/model")
+            self.assertIn("mlx-lm is not installed", str(ctx.exception))
+        finally:
+            sys.meta_path.remove(blocker)
+
+    def test_local_generate_uses_chat_template_when_present(self):
+        calls = []
+        fake = types.ModuleType("mlx_lm")
+        fake.generate = lambda model, tokenizer, **kw: calls.append(kw) or "OUT"
+        sys.modules["mlx_lm"] = fake
+
+        class Tok:
+            chat_template = "some template"
+
+            def apply_chat_template(self, messages, add_generation_prompt, tokenize):
+                return f"TEMPLATED:{messages[0]['content']}"
+
+        out = vb._local_generate("MODEL", Tok(), "hello", 128)
+        self.assertEqual(out, "OUT")
+        self.assertEqual(calls[0]["prompt"], "TEMPLATED:hello")   # template applied
+        self.assertEqual(calls[0]["max_tokens"], 128)
+
+    def test_local_generate_without_chat_template_uses_raw_prompt(self):
+        calls = []
+        fake = types.ModuleType("mlx_lm")
+        fake.generate = lambda model, tokenizer, **kw: calls.append(kw) or "OUT"
+        sys.modules["mlx_lm"] = fake
+
+        class Tok:
+            pass  # no chat_template attribute -> getattr(..., None) is falsy
+
+        out = vb._local_generate("MODEL", Tok(), "hello raw", 64)
+        self.assertEqual(out, "OUT")
+        self.assertEqual(calls[0]["prompt"], "hello raw")
 
 
 if __name__ == "__main__":

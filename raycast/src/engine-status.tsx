@@ -31,14 +31,16 @@ export default function Command() {
 
   async function refresh() {
     setIsLoading(true);
-    const port = daemonPort();
     // loadContract() also computes the schema_version compatibility warning.
+    // Load it first: a configured engine may use a non-default daemon port,
+    // and the subsequent health/settings requests must use that resolved port.
+    await loadContract();
+    const port = daemonPort();
     const [up, settings, modes, doctor] = await Promise.all([
       pingDaemon(),
       loadSettings(),
       loadModes(),
       callEngine(["doctor"]),
-      loadContract(),
     ]);
     const script = resolveScript();
     const python = resolvePython(script);

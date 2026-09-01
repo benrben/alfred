@@ -5,6 +5,7 @@ parser side ("unset flags stay None"); this closes the loop on the apply side.
 Run: ./.venv/bin/python -m pytest tests/test_apply_overrides.py -q
 """
 
+import io
 import os
 import sys
 import unittest
@@ -96,6 +97,25 @@ class ApplyOverrides(unittest.TestCase):
         vb._apply_overrides(cfg3, _ns(backend="auto", model="sonnet"))
         self.assertEqual(cfg3["llm"]["claude_model"], "sonnet")
         self.assertNotEqual(cfg3["llm"]["codex_model"], "sonnet")
+
+        cfg4 = self._cfg()   # local -> only local_model, not claude/codex
+        vb._apply_overrides(cfg4, _ns(backend="local", model="my-hf-model"))
+        self.assertEqual(cfg4["llm"]["local_model"], "my-hf-model")
+        self.assertNotEqual(cfg4["llm"]["claude_model"], "my-hf-model")
+        self.assertNotEqual(cfg4["llm"]["codex_model"], "my-hf-model")
+
+    def test_unknown_mode_warns_but_still_applies(self):
+        cfg = self._cfg()
+        buf = io.StringIO()
+        old_stderr = sys.stderr
+        sys.stderr = buf
+        try:
+            vb._apply_overrides(cfg, _ns(mode="not-a-real-mode"))
+        finally:
+            sys.stderr = old_stderr
+        self.assertEqual(cfg["processing"]["mode"], "not-a-real-mode")
+        self.assertIn("unknown mode", buf.getvalue())
+        self.assertTrue(cfg["processing"]["rewrite"])   # still != "raw"
 
 
 if __name__ == "__main__":

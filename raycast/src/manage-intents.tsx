@@ -24,6 +24,95 @@ import {
   Settings,
 } from "./lib/engine";
 import { intentDetailMarkdown, validateIntentKey } from "./lib/view-logic";
+import type { FormatChoice } from "./lib/engine";
+
+/** The intent's detail body: the raw-transcript note for the non-AI format,
+ * else its rewrite prompt (or a generic placeholder when it has none). */
+function formatBody(f: FormatChoice, mode?: Mode): string {
+  if (!f.ai) return "_Exactly what you said. No LLM call._";
+  return mode?.prompt
+    ? mode.prompt
+    : "_Generic cleanup — no extra shaping prompt._";
+}
+
+/** The List.Item subtitle: "no AI" for the raw format, else the format id. */
+function formatSubtitle(f: FormatChoice): string {
+  return f.id === RAW_FORMAT_ID ? "no AI" : f.id;
+}
+
+interface IntentListItemProps {
+  format: FormatChoice;
+  mode?: Mode;
+  isDefault: boolean;
+  onSetDefault: () => void;
+  onEdit: () => void;
+  onNew: () => void;
+  onReload: () => void;
+}
+
+/** One row in the Manage Intents list: its detail markdown plus the actions to
+ * set it default, edit its prompt (AI formats with a mode only), add a new
+ * intent, or reload. Split out of ManageIntents' formats.map() to keep both
+ * under the complexity gate. */
+function IntentListItem({
+  format: f,
+  mode,
+  isDefault,
+  onSetDefault,
+  onEdit,
+  onNew,
+  onReload,
+}: IntentListItemProps) {
+  return (
+    <List.Item
+      icon={f.ai ? Icon.Wand : Icon.Text}
+      title={f.title}
+      subtitle={formatSubtitle(f)}
+      accessories={
+        isDefault ? [{ tag: { value: "Default", color: Color.Green } }] : []
+      }
+      detail={
+        <List.Item.Detail
+          markdown={intentDetailMarkdown({
+            title: f.title,
+            isDefault,
+            subtitle: f.subtitle,
+            body: formatBody(f, mode),
+          })}
+        />
+      }
+      actions={
+        <ActionPanel>
+          <Action
+            title="Set as Default"
+            icon={Icon.Star}
+            onAction={onSetDefault}
+          />
+          {f.ai && mode ? (
+            <Action
+              title="Edit Prompt"
+              icon={Icon.Pencil}
+              shortcut={{ modifiers: ["cmd"], key: "e" }}
+              onAction={onEdit}
+            />
+          ) : null}
+          <Action
+            title="New Intent"
+            icon={Icon.Plus}
+            shortcut={{ modifiers: ["cmd"], key: "n" }}
+            onAction={onNew}
+          />
+          <Action
+            title="Reload"
+            icon={Icon.ArrowClockwise}
+            shortcut={{ modifiers: ["cmd"], key: "r" }}
+            onAction={onReload}
+          />
+        </ActionPanel>
+      }
+    />
+  );
+}
 
 // See every format/intent, which one is the current default, edit the rewrite
 // prompt behind each, add new ones, and set the default — all saved to
@@ -82,64 +171,16 @@ export default function ManageIntents() {
       ) : (
         formats.map((f) => {
           const mode = modes.find((m) => m.key === f.id);
-          const isDefault = f.id === defaultId;
-          const body = f.ai
-            ? mode?.prompt
-              ? mode.prompt
-              : "_Generic cleanup — no extra shaping prompt._"
-            : "_Exactly what you said. No LLM call._";
           return (
-            <List.Item
+            <IntentListItem
               key={f.id}
-              icon={f.ai ? Icon.Wand : Icon.Text}
-              title={f.title}
-              subtitle={f.id === RAW_FORMAT_ID ? "no AI" : f.id}
-              accessories={
-                isDefault
-                  ? [{ tag: { value: "Default", color: Color.Green } }]
-                  : []
-              }
-              detail={
-                <List.Item.Detail
-                  markdown={intentDetailMarkdown({
-                    title: f.title,
-                    isDefault,
-                    subtitle: f.subtitle,
-                    body,
-                  })}
-                />
-              }
-              actions={
-                <ActionPanel>
-                  <Action
-                    title="Set as Default"
-                    icon={Icon.Star}
-                    onAction={() => makeDefault(f.id)}
-                  />
-                  {f.ai && mode ? (
-                    <Action
-                      title="Edit Prompt"
-                      icon={Icon.Pencil}
-                      shortcut={{ modifiers: ["cmd"], key: "e" }}
-                      onAction={() =>
-                        push(<IntentForm mode={mode} onSaved={reload} />)
-                      }
-                    />
-                  ) : null}
-                  <Action
-                    title="New Intent"
-                    icon={Icon.Plus}
-                    shortcut={{ modifiers: ["cmd"], key: "n" }}
-                    onAction={() => push(<IntentForm onSaved={reload} />)}
-                  />
-                  <Action
-                    title="Reload"
-                    icon={Icon.ArrowClockwise}
-                    shortcut={{ modifiers: ["cmd"], key: "r" }}
-                    onAction={reload}
-                  />
-                </ActionPanel>
-              }
+              format={f}
+              mode={mode}
+              isDefault={f.id === defaultId}
+              onSetDefault={() => makeDefault(f.id)}
+              onEdit={() => push(<IntentForm mode={mode} onSaved={reload} />)}
+              onNew={() => push(<IntentForm onSaved={reload} />)}
+              onReload={reload}
             />
           );
         })

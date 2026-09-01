@@ -5,3 +5,6 @@ dist/
 raycast-env.d.ts
 *.tsbuildinfo
 .DS_Store
+coverage/
+.stryker-tmp/
+reports/

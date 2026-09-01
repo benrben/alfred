@@ -5,7 +5,10 @@
   - _pcm_sample_count: bytes-after-data / 2 (int16 mono);
   - _read_pcm_f32: int16 PCM in [start, end) -> float32 in [-1, 1];
   - _silence_cut: picks the cut at the quietest 50 ms (800-sample) frame inside
-    [target, hard_max], so chunks break at a pause not mid-word.
+    [target, hard_max], so chunks break at a pause not mid-word;
+  - _rms: root-mean-square level used to gate silence;
+  - _secure_dir: mkdir -p + chmod 0700, swallowing a failed chmod;
+  - _stream_path: the shared stream.json location (contract_paths()["stream"]).
 
 We drive these on synthetic bytes/arrays we build by hand — the live background
 chunk loop (StreamSession._run) is integration, out of scope here.
@@ -160,6 +163,69 @@ class SilenceCut(unittest.TestCase):
         buf = np.ones(hard_max, dtype=np.float32)
         cut = vb._silence_cut(buf, target, hard_max)
         self.assertEqual(cut, min(hard_max, len(buf)))
+
+
+@unittest.skipUnless(_HAVE_NP, "numpy not installed")
+class Rms(unittest.TestCase):
+    """_rms: root-mean-square level of a float32 buffer, used to gate a
+    streamed chunk/preview as silence. Defensive: a value numpy can't turn
+    into a float32 array must NOT be treated as silence (which would wrongly
+    drop real audio) — it returns a fixed non-silent 1.0 instead."""
+
+    def test_empty_buffer_is_zero(self):
+        import numpy as np
+        self.assertEqual(vb._rms(np.zeros(0, dtype=np.float32)), 0.0)
+
+    def test_constant_buffer_matches_its_own_magnitude(self):
+        import numpy as np
+        buf = np.full(100, 0.5, dtype=np.float32)
+        self.assertAlmostEqual(vb._rms(buf), 0.5, places=5)
+
+    def test_unconvertible_input_returns_non_silent_default(self):
+        self.assertEqual(vb._rms("not-a-number-array"), 1.0)
+
+
+class SecureDir(unittest.TestCase):
+    """_secure_dir: mkdir -p a directory then chmod it owner-only (0700), for
+    the ~/.voicebridge state files that hold verbatim dictation."""
+
+    def test_creates_directory_with_owner_only_permissions(self):
+        target = Path(tempfile.mkdtemp()) / "nested" / "dir"
+        vb._secure_dir(target)
+        self.assertTrue(target.is_dir())
+        self.assertEqual(target.stat().st_mode & 0o777, 0o700)
+
+    def test_existing_directory_is_left_in_place_idempotently(self):
+        target = Path(tempfile.mkdtemp()) / "dir"
+        vb._secure_dir(target)
+        vb._secure_dir(target)          # second call must not raise
+        self.assertTrue(target.is_dir())
+
+    def test_chmod_failure_is_swallowed(self):
+        # A chmod that can't apply (e.g. an unprivileged process on a mount
+        # that rejects mode changes) must not crash the caller — the
+        # directory still gets created, just not necessarily hardened.
+        target = Path(tempfile.mkdtemp()) / "dir"
+        orig_chmod = os.chmod
+
+        def boom(path, mode):
+            raise OSError("chmod not permitted")
+
+        os.chmod = boom
+        try:
+            vb._secure_dir(target)      # must not raise
+        finally:
+            os.chmod = orig_chmod
+        self.assertTrue(target.is_dir())
+
+
+class StreamPathHelper(unittest.TestCase):
+    """_stream_path: the shared stream.json location, straight from
+    contract_paths(). (Its own tests widely monkeypatch it to a temp path —
+    this exercises the real, un-patched body.)"""
+
+    def test_matches_contract_paths_stream_entry(self):
+        self.assertEqual(vb._stream_path(), vb.contract_paths()["stream"])
 
 
 if __name__ == "__main__":

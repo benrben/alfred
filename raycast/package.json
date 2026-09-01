@@ -5,7 +5,9 @@
   "description": "Local speech-to-text + LLM cleanup. Dictate, transform selected text, and browse history via the Alfred engine — talks to the warm daemon, no API key.",
   "icon": "extension-icon.png",
   "author": "benrben",
-  "categories": ["Productivity"],
+  "categories": [
+    "Productivity"
+  ],
   "license": "MIT",
   "commands": [
     {
@@ -83,11 +85,26 @@
       "required": false,
       "default": "default",
       "data": [
-        { "title": "Default (config)", "value": "default" },
-        { "title": "local (on-device MLX)", "value": "local" },
-        { "title": "auto", "value": "auto" },
-        { "title": "claude", "value": "claude" },
-        { "title": "codex", "value": "codex" }
+        {
+          "title": "Default (config)",
+          "value": "default"
+        },
+        {
+          "title": "local (on-device MLX)",
+          "value": "local"
+        },
+        {
+          "title": "auto",
+          "value": "auto"
+        },
+        {
+          "title": "claude",
+          "value": "claude"
+        },
+        {
+          "title": "codex",
+          "value": "codex"
+        }
       ]
     },
     {
@@ -98,9 +115,18 @@
       "required": false,
       "default": "default",
       "data": [
-        { "title": "Default (config)", "value": "default" },
-        { "title": "On", "value": "on" },
-        { "title": "Off", "value": "off" }
+        {
+          "title": "Default (config)",
+          "value": "default"
+        },
+        {
+          "title": "On",
+          "value": "on"
+        },
+        {
+          "title": "Off",
+          "value": "off"
+        }
       ]
     },
     {
@@ -129,15 +155,26 @@
     }
   ],
   "dependencies": {
-    "@raycast/api": "^1.80.0"
+    "@raycast/api": "^2.0.5"
   },
   "devDependencies": {
     "@raycast/eslint-config": "^1.0.11",
+    "@stryker-mutator/core": "^9.6.1",
+    "@stryker-mutator/vitest-runner": "^9.6.1",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
     "@types/node": "22.19.17",
     "@types/react": "19.0.10",
+    "@types/react-dom": "^19.0.6",
+    "@vitest/coverage-v8": "^2.1.9",
     "eslint": "^8.57.0",
     "eslint-plugin-react-hooks": "^4.6.2",
+    "jsdom": "^25.0.1",
+    "knip": "^6.34.0",
     "prettier": "^3.3.3",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
     "typescript": "^5.5.4",
     "vitest": "^2.1.9"
   },

@@ -19,10 +19,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import voicebridge as vb  # noqa: E402
 
+# A path guaranteed not to exist, so load_config falls through to its
+# built-in DEFAULTS instead of picking up a real ~/.config/voicebridge
+# config.toml (load_config(None) searches the real CONFIG_SEARCH paths, NOT
+# "no config" — passing a nonexistent path is what actually isolates a test
+# from whatever the machine running it happens to have configured).
+NO_CFG = "/nonexistent/alfred-test-config.toml"
+
 
 def _cfg(**processing):
-    """A minimal config tree with processing overrides."""
-    cfg = vb.load_config(None)  # built-in DEFAULTS (no TOML)
+    """A minimal config tree (built-in DEFAULTS, no real TOML) with
+    processing overrides."""
+    cfg = vb.load_config(NO_CFG)
     cfg["processing"].update(processing)
     return cfg
 
@@ -100,6 +108,13 @@ class CombinedPromptFolding(unittest.TestCase):
         self.assertEqual(out, "raw text")
         self.assertEqual(self.calls, [], "no LLM call when nothing is enabled")
 
+    def test_empty_text_short_circuits_before_any_stage(self):
+        # Even with every stage enabled, blank input never reaches the LLM.
+        cfg = _cfg(translate=True, rewrite=True, optimize=True)
+        for blank in ("", "   ", "\n\t "):
+            self.assertEqual(vb.process_text(blank, cfg), "")
+        self.assertEqual(self.calls, [])
+
     def test_long_transcript_is_chunked_across_calls(self):
         # An 18-minute dictation used to translate in ONE call and truncate at the
         # local token cap. It must now split into several bounded calls, each
@@ -172,6 +187,32 @@ class SplitForProcessing(unittest.TestCase):
         self.assertEqual(chunks[0][0], paras[0] + "\n\n" + paras[1])
         self.assertEqual(chunks[1][0], paras[2] + "\n\n" + paras[3])
 
+    def test_extra_blank_lines_between_paragraphs_are_skipped_not_kept_empty(self):
+        # 4+ consecutive newlines make text.split("\n\n") yield an EMPTY
+        # paragraph string between the two real ones; it must be dropped, not
+        # turned into a stray empty unit/chunk.
+        p1 = "Para one here with some words to pad it out for length here."
+        p2 = "Para two continues here with additional padding words too."
+        text = f"{p1}\n\n\n\n{p2}"
+        chunks = vb._split_for_processing(text, 60)
+        joined = "".join(c for c, _ in chunks)
+        self.assertEqual(joined, p1 + p2)
+        # Exactly the two REAL paragraphs start a new paragraph, not three.
+        self.assertEqual(sum(1 for _, starts in chunks if starts), 2)
+
+    def test_paragraph_units_skips_empty_sentence_split_artifact(self):
+        # _SENT_SPLIT.split() can hand back a whitespace-only trailing piece
+        # when a paragraph's final sentence-ending punctuation is itself
+        # followed by more whitespace. _split_for_processing's own paragraph
+        # loop always calls this helper with an already-.strip()ped paragraph
+        # (which can never trigger that), so exercise the helper directly to
+        # prove the defensive skip works if it's ever handed one.
+        para = "One sentence here that is somewhat long for the budget test. Two.   "
+        self.assertEqual(vb.pipeline._SENT_SPLIT.split(para)[-1], "")  # the artifact
+        units = vb.pipeline._paragraph_units(para, 40)
+        self.assertTrue(all(u.strip() for u, _ in units), "no blank unit produced")
+        self.assertEqual("".join(u for u, _ in units), "One sentence here that is somewhat long for the budget test.Two.")
+
 
 class ChunkedProcessingPreservesParagraphs(unittest.TestCase):
     """Regression: process_text's chunk-output join used to flatten EVERY
@@ -218,6 +259,113 @@ class ChunkedProcessingPreservesParagraphs(unittest.TestCase):
 
         self.assertEqual(out, text)
         self.assertNotIn("\n\n", out, "one paragraph split by size stays one")
+
+    def test_whitespace_only_chunk_output_is_skipped_not_kept_blank(self):
+        # A chunk whose LLM output comes back whitespace-only (truthy, so
+        # _process_chunk's `or text` fallback does NOT kick in) must be
+        # dropped when rejoining, not turned into a stray blank segment.
+        para = ("Sentence one. Sentence two. Sentence three. " * 20).strip()
+        text = "\n\n".join([para, para])
+        vb._chunk_char_budget = lambda c: len(para) + 50
+
+        calls = []
+
+        def fake(backends, prompt, cfg):
+            calls.append(prompt)
+            return "   " if len(calls) == 1 else "SECOND CHUNK OUTPUT"
+
+        vb.run_llm_fallback = fake
+        cfg = _cfg(rewrite=True, mode="notes", combine_stages=True)
+
+        out = vb.process_text(text, cfg)
+
+        self.assertEqual(len(calls), 2, "both chunks must still be processed")
+        self.assertEqual(out, "SECOND CHUNK OUTPUT")
+
+
+class ModeLookupHelpers(unittest.TestCase):
+    """mode_prompt and rewrite_instruction both look up a mode's catalog
+    entry; the [intent] shorthand (a bare string instead of a table) is
+    normalized to {"prompt": ...}."""
+
+    def test_mode_prompt_returns_builtin_prompt(self):
+        cfg = _cfg()
+        self.assertIn("clear, courteous email", vb.mode_prompt(cfg, "email"))
+
+    def test_mode_prompt_unknown_mode_is_empty(self):
+        self.assertEqual(vb.mode_prompt(_cfg(), "no-such-mode"), "")
+
+    def test_intent_shorthand_string_becomes_prompt(self):
+        cfg = _cfg()
+        cfg["intent"] = {"custom": "Custom shorthand prompt text"}
+        entry = next(m for m in vb.mode_catalog(cfg) if m["key"] == "custom")
+        self.assertEqual(entry["prompt"], "Custom shorthand prompt text")
+        self.assertEqual(vb.mode_prompt(cfg, "custom"), "Custom shorthand prompt text")
+
+    def test_replace_mode_uses_its_prompt_wholesale(self):
+        # The built-in "prompt" mode (Prompt Optimizer) sets replace=True, so
+        # rewrite_instruction must return ITS prompt as-is, not appended to
+        # the generic cleanup instruction.
+        cfg = _cfg(mode="prompt")
+        instr = vb.rewrite_instruction(cfg)
+        self.assertEqual(instr, vb._PROMPT_OPTIMIZER)
+        self.assertNotIn(vb._REWRITE, instr)
+
+
+class SingleStagePromptDirect(unittest.TestCase):
+    """single_stage_prompt picks the right instruction per stage kind."""
+
+    def test_translate_kind_uses_translate_instruction(self):
+        out = vb.single_stage_prompt("translate", "REWRITE_INSTR", "TXT")
+        self.assertIn(vb._TRANSLATE, out)
+        self.assertNotIn("REWRITE_INSTR", out)
+        self.assertTrue(out.rstrip().endswith("TXT"))
+
+    def test_optimize_kind_uses_optimize_instruction(self):
+        out = vb.single_stage_prompt("optimize", "REWRITE_INSTR", "TXT")
+        self.assertIn(vb._OPTIMIZE, out)
+        self.assertNotIn("REWRITE_INSTR", out)
+
+    def test_rewrite_kind_uses_the_rewrite_instruction_argument(self):
+        out = vb.single_stage_prompt("rewrite", "REWRITE_INSTR", "TXT")
+        self.assertIn("REWRITE_INSTR", out)
+        self.assertNotIn(vb._TRANSLATE, out)
+        self.assertNotIn(vb._OPTIMIZE, out)
+
+
+class PerStageProcessingWithoutCombine(unittest.TestCase):
+    """With combine_stages off, _process_chunk makes one LLM call PER enabled
+    stage, chaining each stage's output into the next stage's input (rather
+    than the single combined-prompt call combine_stages=True makes)."""
+
+    def setUp(self):
+        self._orig_fallback = vb.run_llm_fallback
+        self._orig_cands = vb.candidate_backends
+        vb.candidate_backends = lambda cfg: ["fake"]
+
+    def tearDown(self):
+        vb.run_llm_fallback = self._orig_fallback
+        vb.candidate_backends = self._orig_cands
+
+    def test_combine_stages_off_calls_llm_once_per_enabled_stage(self):
+        calls = []
+
+        def fake(backends, prompt, cfg):
+            calls.append(prompt)
+            return f"STAGE{len(calls)}"
+
+        vb.run_llm_fallback = fake
+        cfg = _cfg(translate=True, rewrite=True, optimize=True, mode="raw",
+                   translate_via="llm", combine_stages=False)
+
+        out = vb.process_text("hello world", cfg)
+
+        self.assertEqual(len(calls), 3, "one LLM call per enabled stage")
+        self.assertIn(vb._TRANSLATE, calls[0])
+        self.assertIn("hello world", calls[0])   # stage 1 sees the original input
+        self.assertIn("STAGE1", calls[1])        # stage 2 chains off stage 1's output
+        self.assertIn("STAGE2", calls[2])        # stage 3 chains off stage 2's output
+        self.assertEqual(out, "STAGE3")
 
 
 if __name__ == "__main__":

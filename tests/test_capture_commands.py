@@ -21,6 +21,7 @@ Run: ./.venv/bin/python -m pytest tests/test_capture_commands.py -q
 import io
 import os
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -153,6 +154,57 @@ class FinishCaptureInvariants(unittest.TestCase):
         self.assertEqual(buf.getvalue(), "FINAL\n")
         self.assertEqual(cap.delivered, [])              # nothing copied/saved
 
+    def test_stdout_mode_keeps_raw_fallback_on_llm_failure(self):
+        # --stdout has the same contract on the failure path as on success:
+        # emit the recoverable raw transcript and do not switch to clipboard /
+        # file delivery just because processing failed.
+        cfg = self._cfg(rewrite=True)
+        orig = vb.process_text
+        vb.process_text = lambda text, c: (_ for _ in ()).throw(
+            RuntimeError("backend exploded"))
+        buf = io.StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with _Capture() as cap:
+                rc = vb._finish_capture(
+                    "raw words here", cfg, _ns(stdout=True), vb._Progress())
+        finally:
+            vb.process_text = orig
+            sys.stdout = old
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(buf.getvalue(), "raw words here\n")
+        self.assertEqual(cap.delivered, [])
+
+
+class MaybeRemoveAudioBehavior(unittest.TestCase):
+    """Direct tests for _maybe_remove_audio: the keep_audio escape hatch, and
+    the OSError-swallowing guarantee (cleanup can never fail the command)."""
+
+    def _cfg(self, keep_audio):
+        cfg = vb.load_config(NO_CFG)
+        cfg["output"]["keep_audio"] = keep_audio
+        return cfg
+
+    def test_keep_audio_true_leaves_file_in_place(self):
+        import tempfile
+        path = Path(tempfile.mkdtemp()) / "rec.wav"
+        path.write_bytes(b"\x00")
+        vb._maybe_remove_audio(str(path), self._cfg(keep_audio=True))
+        self.assertTrue(path.exists())
+
+    def test_keep_audio_false_removes_file(self):
+        import tempfile
+        path = Path(tempfile.mkdtemp()) / "rec.wav"
+        path.write_bytes(b"\x00")
+        vb._maybe_remove_audio(str(path), self._cfg(keep_audio=False))
+        self.assertFalse(path.exists())
+
+    def test_missing_file_oserror_is_swallowed(self):
+        # No exception should escape even though the file never existed.
+        vb._maybe_remove_audio("/no/such/dir/rec.wav", self._cfg(keep_audio=False))
+
 
 class CmdProcessOrchestration(unittest.TestCase):
     def setUp(self):
@@ -205,6 +257,36 @@ class CmdProcessOrchestration(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(cap.last_status, ("error", "stt_failed"))
 
+    def test_warns_when_translate_via_whisper_but_model_cant(self):
+        # translate_via="whisper" isn't reachable through any CLI override, so
+        # drive it via the loaded config (the way a config.toml would set it).
+        # The default (turbo) model can't Whisper-translate, so cmd_process
+        # must note it's falling back to the LLM instead of silently doing so.
+        orig_load = vb.load_config
+
+        def fake_load(path):
+            cfg = orig_load(path)
+            cfg["processing"]["translate"] = True
+            cfg["processing"]["translate_via"] = "whisper"
+            return cfg
+        vb.load_config = fake_load
+        vb.transcribe = lambda *a, **k: ("spoken text", "en")
+        orig_pt = vb.process_text
+        vb.process_text = lambda text, c: text
+        buf = io.StringIO()
+        old_stderr = sys.stderr
+        sys.stderr = buf
+        try:
+            with _Capture() as cap:
+                rc = vb.cmd_process(self._ns_audio())
+        finally:
+            sys.stderr = old_stderr
+            vb.load_config = orig_load
+            vb.process_text = orig_pt
+        self.assertEqual(rc, 0)
+        self.assertIn("cannot Whisper-translate", buf.getvalue())
+        self.assertEqual([t for t, _ in cap.delivered], ["spoken text"])
+
 
 class CmdStreamFinishFallback(unittest.TestCase):
     """With no live session (daemon down), stream-finish falls back to a batch
@@ -238,6 +320,23 @@ class CmdStreamFinishFallback(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(seen["path"], str(self.audio))
         self.assertEqual([t for t, _ in cap.delivered], ["STREAMED WORDS"])
+
+    def test_no_session_transcribe_failure_reports_stt_failed(self):
+        def boom(*a, **k):
+            raise RuntimeError("whisper down")
+        vb.transcribe = boom
+        with _Capture() as cap:
+            rc = vb.cmd_stream_finish(_ns(audio=str(self.audio)))
+        self.assertEqual(rc, 1)
+        self.assertEqual(cap.last_status, ("error", "stt_failed"))
+
+    def test_no_session_empty_transcript_yields_empty_status_no_delivery(self):
+        vb.transcribe = lambda *a, **k: ("", None)
+        with _Capture() as cap:
+            rc = vb.cmd_stream_finish(_ns(audio=str(self.audio)))
+        self.assertEqual(rc, 0)
+        self.assertEqual(cap.last_status, ("empty",))
+        self.assertEqual(cap.delivered, [])
 
 
 class CmdStreamLive(unittest.TestCase):
@@ -288,6 +387,29 @@ class CmdStreamLive(unittest.TestCase):
         self.assertTrue(first.stop)
         self.assertIsNot(vb._STREAMS[self.audio], first)
 
+    def test_start_reaps_a_stale_session_at_a_different_key(self):
+        # The reap loop (stream-start's housekeeping for abandoned recordings)
+        # must both (a) pop+stop an unrelated stale entry and (b) leave a
+        # fresh, non-stale entry AT THE SAME KEY as this start alone so it can
+        # still be found and stopped by the `old =` lookup right after.
+        class Stub:
+            def __init__(self, stop, started):
+                self.stop = stop
+                self.started = started
+
+        stale = Stub(stop=True, started=0.0)          # already abandoned
+        fresh_same_key = Stub(stop=False, started=time.monotonic())  # not stale
+        vb._STREAMS["some/other.wav"] = stale
+        vb._STREAMS[self.audio] = fresh_same_key
+
+        vb.StreamSession = self._fake_session()
+        with _Capture():
+            rc = vb.cmd_stream_start(_ns(audio=self.audio))
+        self.assertEqual(rc, 0)
+        self.assertNotIn("some/other.wav", vb._STREAMS)   # reaped by the loop
+        self.assertTrue(fresh_same_key.stop)               # stopped via `old`
+        self.assertIsNot(vb._STREAMS[self.audio], fresh_same_key)  # replaced
+
     def test_timestamps_flag_discards_live_session_for_a_true_batch_transcribe(self):
         # Regression: --timestamps used to be silently honoured only on the
         # no-session batch path; against a LIVE session it was dropped with no
@@ -328,6 +450,35 @@ class CmdStreamLive(unittest.TestCase):
                          ["[0:00] batch transcript with real timestamps"])
         # The session was popped and stopped, not left dangling.
         self.assertNotIn(self.audio, vb._STREAMS)
+
+    def test_timestamps_discard_finish_failure_still_falls_back_to_batch(self):
+        # Regression-shaped: stopping the live session (purely to discard its
+        # chunk-relative text before --timestamps forces a real batch
+        # transcribe) can itself raise. That must be swallowed — logged, not
+        # propagated — and the batch fallback must still run to completion.
+        vb.StreamSession = self._fake_session(
+            text="SESSION TEXT (chunk-relative, discarded)", raise_on_finish=True)
+        seen = {}
+
+        def fake_tx(path, cfg, *, language, whisper_translate, timestamps=False):
+            seen["called"] = True
+            return "batch transcript", "en"
+
+        orig_tx = vb.transcribe
+        vb.transcribe = fake_tx
+        orig_pt = vb.process_text
+        vb.process_text = lambda text, c: text
+        try:
+            with _Capture() as cap:
+                vb.cmd_stream_start(_ns(audio=self.audio))
+                rc = vb.cmd_stream_finish(_ns(audio=self.audio, timestamps=True))
+        finally:
+            vb.process_text = orig_pt
+            vb.transcribe = orig_tx
+
+        self.assertEqual(rc, 0)
+        self.assertTrue(seen.get("called"))
+        self.assertEqual([t for t, _ in cap.delivered], ["batch transcript"])
 
     def test_finish_time_format_override_reaches_process_text(self):
         # Record with defaults, then finish with --mode email: the finish-time
@@ -384,6 +535,19 @@ class CmdTextRouting(unittest.TestCase):
         self.assertEqual(self.refine_calls, [("draft text", "make it formal")])
         self.assertEqual(self.process_calls, [])
         self.assertEqual([t for t, _ in cap.delivered], ["R:draft text"])
+
+    def test_stdout_flag_writes_final_and_skips_delivery(self):
+        buf = io.StringIO()
+        old = sys.stdout
+        sys.stdout = buf
+        try:
+            with _Capture() as cap:
+                rc = vb.cmd_text(_ns(text="hello world", instruction=None, stdout=True))
+        finally:
+            sys.stdout = old
+        self.assertEqual(rc, 0)
+        self.assertEqual(buf.getvalue(), "P:hello world\n")
+        self.assertEqual(cap.delivered, [])
 
     def test_stdin_dash_reads_from_stdin(self):
         old = sys.stdin

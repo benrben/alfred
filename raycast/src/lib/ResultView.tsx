@@ -10,15 +10,20 @@ import {
 } from "@raycast/api";
 import { useState } from "react";
 import {
+  BACKENDS,
   backendFlags,
   callEngine,
   FormatChoice,
+  getPrefs,
   flagsForFormat,
-  lastErrorLine,
+  normalizeBackend,
+  normalizeTranslate,
   resolveDelivery,
 } from "./engine";
 import {
+  backendLabel,
   composeResultMarkdown,
+  engineErrorExcerpt,
   initialBanner,
   refinedBanner,
   reprocessBanner,
@@ -30,6 +35,10 @@ interface ResultViewProps {
   llmFailed?: boolean;
   /** Auto-paste was requested but the keystroke didn't land (surfaced as a note). */
   pasteFailed?: boolean;
+  /** Backend used for the preceding run, when the caller selected one. */
+  backend?: string;
+  /** Translation override used for the preceding run. */
+  translate?: string;
   formats: FormatChoice[];
   /** Shown as the top note when first opened (e.g. the format that produced it). */
   note?: string;
@@ -42,9 +51,11 @@ interface ResultViewProps {
 // revised text to the result screen.
 function FeedbackForm({
   currentText,
+  backend,
   onRefined,
 }: {
   currentText: string;
+  backend: string;
   onRefined: (text: string, instruction: string) => void;
 }) {
   const { pop } = useNavigation();
@@ -63,7 +74,7 @@ function FeedbackForm({
       currentText,
       "--instruction",
       instruction,
-      ...backendFlags(),
+      ...backendFlags(backend),
     ]);
     const delivered = await resolveDelivery(res);
     setBusy(false);
@@ -75,7 +86,7 @@ function FeedbackForm({
     } else {
       toast.style = Toast.Style.Failure;
       toast.title = "Refine failed";
-      toast.message = lastErrorLine(res.err);
+      toast.message = engineErrorExcerpt(res);
     }
   }
 
@@ -112,12 +123,20 @@ export function ResultView({
   path,
   llmFailed,
   pasteFailed,
+  backend: initialBackend,
+  translate: initialTranslate,
   formats,
   note,
   onDictateAgain,
 }: ResultViewProps) {
   const { push } = useNavigation();
   const [text, setText] = useState(initialText);
+  const [backend, setBackend] = useState(() =>
+    normalizeBackend(initialBackend ?? getPrefs().backend),
+  );
+  const [translate] = useState(() =>
+    normalizeTranslate(initialTranslate ?? getPrefs().translate),
+  );
   const [banner, setBanner] = useState<string>(
     initialBanner({ llmFailed, pasteFailed, path, note }),
   );
@@ -129,7 +148,11 @@ export function ResultView({
       style: Toast.Style.Animated,
       title: `Reprocessing — ${fmt.title}…`,
     });
-    const res = await callEngine(["text", text, ...flagsForFormat(fmt)]);
+    const res = await callEngine([
+      "text",
+      text,
+      ...flagsForFormat(fmt, { backend, translate }),
+    ]);
     const delivered = await resolveDelivery(res);
     setBusy(false);
     if (delivered.kind === "copied" || delivered.kind === "saved") {
@@ -140,13 +163,19 @@ export function ResultView({
     } else {
       toast.style = Toast.Style.Failure;
       toast.title = "Reprocess failed";
-      toast.message = lastErrorLine(res.err);
+      toast.message = engineErrorExcerpt(res);
     }
   }
 
   function applyRefined(newText: string, instruction: string) {
     setText(newText);
     setBanner(refinedBanner(instruction));
+  }
+
+  // Checkmark on the currently-selected backend choice, plain gear otherwise —
+  // shared by "Default (config)" and every BACKENDS entry below.
+  function backendIcon(choice: string) {
+    return backend === choice ? Icon.Checkmark : Icon.Gear;
   }
 
   const markdown = composeResultMarkdown({
@@ -172,9 +201,34 @@ export function ResultView({
             icon={Icon.Pencil}
             shortcut={{ modifiers: ["cmd"], key: "e" }}
             onAction={() =>
-              push(<FeedbackForm currentText={text} onRefined={applyRefined} />)
+              push(
+                <FeedbackForm
+                  currentText={text}
+                  backend={backend}
+                  onRefined={applyRefined}
+                />,
+              )
             }
           />
+          <ActionPanel.Submenu
+            title={`Backend: ${backendLabel(backend)}`}
+            icon={Icon.Gear}
+            shortcut={{ modifiers: ["cmd"], key: "b" }}
+          >
+            <Action
+              title="Default (config)"
+              icon={backendIcon("default")}
+              onAction={() => setBackend("default")}
+            />
+            {BACKENDS.map((choice) => (
+              <Action
+                key={choice}
+                title={choice}
+                icon={backendIcon(choice)}
+                onAction={() => setBackend(choice)}
+              />
+            ))}
+          </ActionPanel.Submenu>
           <ActionPanel.Submenu
             title="Reprocess As…"
             icon={Icon.Wand}

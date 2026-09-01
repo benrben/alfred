@@ -15,6 +15,7 @@ Run: ./.venv/bin/python -m pytest tests/test_stream_session.py -q
 """
 
 import importlib.util
+import io
 import json
 import os
 import struct
@@ -161,6 +162,34 @@ class StreamSessionLifecycle(unittest.TestCase):
         self.assertGreater(full.cursor, 0)
         self.assertEqual(full.parts, ["c1"])
 
+    def test_chunk_once_picks_up_data_offset_once_header_is_written(self):
+        # A session created while only a stub file exists (no 'data' tag yet,
+        # so the offset falls back to 44) must notice once the real WAV header
+        # (here with an extra chunk before 'data', so the true offset != 44)
+        # has been written, rather than reading from the wrong byte forever.
+        path = str(self.tmp / "rec.wav")
+        with open(path, "wb") as f:
+            f.write(b"RIFF" + b"\x00" * 4)          # no 'data' tag -> offset 44
+        sess = vb.StreamSession(path, {"stt": {"model": "x"}},
+                                language="auto", whisper_translate=False)
+        self.assertEqual(sess.data_off, 44)
+
+        pcm = _ramp_pcm(self.MAX + self.FRAME)
+        extra = b"LIST" + struct.pack("<I", 4) + b"INFO"
+        header = (
+            b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVE"
+            + b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, 16000, 32000, 2, 16)
+            + extra
+            + b"data" + struct.pack("<I", len(pcm)) + pcm
+        )
+        with open(path, "wb") as f:
+            f.write(header)
+        real_off = vb._wav_data_offset(path)
+        self.assertNotEqual(real_off, 44)
+
+        self.assertTrue(sess._chunk_once())
+        self.assertEqual(sess.data_off, real_off)
+
     # ---- finish() tail drain (no thread) ---------------------------------
     def test_finish_drains_tail_and_returns_text_and_lang(self):
         sess = self._session(self.FRAME * 3)    # one short tail, < MAX
@@ -180,6 +209,18 @@ class StreamSessionLifecycle(unittest.TestCase):
         avail = vb._pcm_sample_count(sess.path, sess.data_off)
         self.assertLessEqual(avail - sess.cursor, self.FRAME)
 
+    def test_finish_breaks_on_no_progress_safety_check(self):
+        # If _transcribe somehow fails to advance the cursor (defensive: should
+        # never happen in practice), finish()'s drain loop must not spin
+        # forever — it breaks out instead.
+        sess = self._session(self.MAX * 5)     # far more than one MAX chunk left
+        sess._transcribe = lambda end: None    # stub: cursor never advances
+        text, lang = sess.finish()
+        self.assertEqual(sess.cursor, 0)       # loop broke without progress
+        self.assertTrue(sess.done)
+        self.assertEqual(text, "")             # nothing was ever committed
+        self.assertIsNone(lang)
+
     # ---- live tail preview (builds the transcript between chunks) ----------
     def test_preview_shows_uncommitted_tail_before_a_chunk_commits(self):
         # Less than one full chunk of audio: nothing commits, but _preview()
@@ -193,6 +234,43 @@ class StreamSessionLifecycle(unittest.TestCase):
         live = json.loads(self.stream_path.read_text())
         self.assertEqual(live["transcript"], sess.preview)   # HUD shows the preview
         self.assertTrue(live["recording"])
+
+    def test_preview_throttled_returns_false_within_window(self):
+        sess = self._session(self.MAX * 2)
+        self.assertTrue(sess._preview())           # first call succeeds (SECS=0.0)
+        calls_after_first = len(self.calls)
+        vb._STREAM_PREVIEW_SECS = 999999.0         # now well inside a throttle window
+        self.assertFalse(sess._preview())          # throttled: no new model call
+        self.assertEqual(len(self.calls), calls_after_first)
+
+    def test_preview_returns_false_when_tail_below_preview_min(self):
+        sess = self._session(self.FRAME // 2)      # less than PREVIEW_MIN of audio
+        self.assertFalse(sess._preview())
+        self.assertEqual(self.calls, [])
+        self.assertEqual(sess.preview, "")
+
+    def test_preview_returns_false_for_a_silent_tail(self):
+        import numpy as np
+        sess = self._session(self.MAX * 2)
+        orig = vb._read_pcm_f32
+        vb._read_pcm_f32 = lambda *a, **k: np.zeros(self.MAX, dtype=np.float32)
+        try:
+            self.assertFalse(sess._preview())
+        finally:
+            vb._read_pcm_f32 = orig
+        self.assertEqual(self.calls, [])
+        self.assertEqual(sess.preview, "")
+
+    def test_preview_does_not_update_last_lang_when_lang_is_falsy(self):
+        sess = self._session(self.MAX * 2)
+        orig = vb.transcribe_samples
+        vb.transcribe_samples = lambda *a, **k: ("partial text", None)
+        try:
+            self.assertTrue(sess._preview())
+        finally:
+            vb.transcribe_samples = orig
+        self.assertEqual(sess.preview, "partial text")
+        self.assertIsNone(sess.last_lang)          # unchanged: still the default
 
     def test_commit_absorbs_and_clears_the_preview(self):
         sess = self._session(self.MAX * 2)
@@ -226,6 +304,95 @@ class StreamSessionLifecycle(unittest.TestCase):
         self.assertFalse(final["recording"])     # stop set in finish()
         self.assertTrue(final["done"])
         self.assertEqual(final["transcript"], sess.text)
+
+    def test_write_is_skipped_when_a_different_session_is_active(self):
+        # A superseded/abandoned session must not clobber the shared
+        # stream.json that the CURRENT recording's HUD is reading.
+        sess = self._session(self.FRAME * 3)
+        other = self._session(self.FRAME * 3)
+        vb._ACTIVE_STREAM = other
+        try:
+            sess._write()
+        finally:
+            vb._ACTIVE_STREAM = None
+        self.assertFalse(self.stream_path.exists())
+
+    def test_write_swallows_errors_when_the_stream_path_is_unwritable(self):
+        # _write must never let a sidecar-write failure crash the streaming
+        # loop; it's swallowed.
+        sess = self._session(self.FRAME * 3)
+        blocker = self.tmp / "not_a_dir"
+        blocker.write_text("x")                     # a FILE, not a directory
+        bad_path = blocker / "nested" / "stream.json"
+        orig = vb._stream_path
+        vb._stream_path = lambda: bad_path
+        try:
+            sess._write()                            # must not raise
+        finally:
+            vb._stream_path = orig
+        self.assertFalse(bad_path.exists())
+
+    # ---- _track_idle (idle-poll bookkeeping extracted from _run) ---------
+    def test_track_idle_resets_when_a_chunk_worked(self):
+        sess = self._session(0)
+        self.assertEqual(sess._track_idle(True, 100, 100, 5), 0)
+        self.assertFalse(sess.stop)
+
+    def test_track_idle_resets_when_avail_grew(self):
+        sess = self._session(0)
+        self.assertEqual(sess._track_idle(False, 200, 100, 5), 0)
+        self.assertFalse(sess.stop)
+
+    def test_track_idle_increments_when_stalled(self):
+        sess = self._session(0)
+        self.assertEqual(sess._track_idle(False, 100, 100, 5), 6)
+        self.assertFalse(sess.stop)
+
+    def test_track_idle_abandons_session_after_enough_stalled_polls(self):
+        # Drive it for real to the production _STREAM_ABANDON_POLLS threshold
+        # (this is a pure function — no sleeping involved — so no need to
+        # shrink the real constant to keep the test fast).
+        sess = self._session(0)
+        idle = 0
+        for _ in range(200):
+            idle = sess._track_idle(False, 100, 100, idle)
+            if sess.stop:
+                break
+        self.assertTrue(sess.stop)
+        self.assertEqual(idle, vb._STREAM_ABANDON_POLLS)
+
+    # ---- _run (the background chunk loop, driven directly/synchronously) --
+    def test_run_refreshes_preview_when_no_chunk_commits(self):
+        # Audio too short for a full chunk: _chunk_once() returns False every
+        # time, so _run must fall through to _preview() instead of skipping it.
+        sess = self._session(self.MAX - self.FRAME)
+        real_chunk_once = sess._chunk_once
+
+        def one_pass_then_stop():
+            sess.stop = True          # let _run() exit after this one iteration
+            return real_chunk_once()
+
+        sess._chunk_once = one_pass_then_stop
+        sess._run()                    # synchronous: exactly one iteration
+        self.assertEqual(len(self.calls), 1)   # the preview call fired
+        self.assertEqual(sess.preview, "c1")
+
+    def test_run_logs_and_continues_past_a_chunk_error(self):
+        sess = self._session(self.MAX - self.FRAME)
+
+        def boom():
+            sess.stop = True          # let _run() exit after this one iteration
+            raise RuntimeError("boom")
+
+        sess._chunk_once = boom
+        captured = io.StringIO()
+        orig_stderr = sys.stderr
+        sys.stderr = captured
+        try:
+            sess._run()                # must not propagate the exception
+        finally:
+            sys.stderr = orig_stderr
+        self.assertIn("stream chunk error: boom", captured.getvalue())
 
     # ---- start()/finish() round-trip (exercises the thread) --------------
     def test_start_then_finish_round_trip(self):

@@ -1,6 +1,8 @@
-# Alfred is a script-first project (voicebridge.py runs directly, no packaging),
-# so this file exists only to configure dev tooling — currently ruff.
-# Run: make lint   (or: .venv/bin/ruff check voicebridge.py tests/)
+# Alfred's engine is the voicebridge/ package (voicebridge.py is a 3-line entry
+# shim — see voicebridge/__init__.py for why the split uses `_pkg.name()` calls
+# instead of `from .x import y`), so this file exists only to configure dev
+# tooling — currently ruff, mypy, and vulture.
+# Run: make lint   (or: .venv/bin/ruff check voicebridge.py voicebridge tests/)
 
 [tool.ruff]
 line-length = 100
@@ -18,3 +20,36 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["E402"]  # tests sys.path.insert before importing voicebridge
+
+# ---- Quality gate analyzers (.quality/quality-gate.json runs these) ----------
+
+[tool.mypy]
+# `.venv/bin/python -m mypy` — the engine plus its tests plus the quality-gate
+# dependency-edge adapter (.quality/dependency_edges.py is real, tested code,
+# not generated gate output — only that one file needs checking under .quality/).
+python_version = "3.11"
+# voicebridge.py is excluded, not listed: mypy maps file paths to module names,
+# and voicebridge.py and voicebridge/ would both map to "voicebridge" (Python's
+# own import resolves that by having the package shadow the file — see
+# voicebridge/__init__.py — but mypy has no equivalent and errors on the
+# duplicate). The shim is 3 lines with nothing to type-check.
+files = ["voicebridge", "tests", ".quality/dependency_edges.py"]
+ignore_missing_imports = true  # mlx_*, soundfile, tomlkit ship no stubs
+exclude = ["^\\.venv/", "^raycast/", "^\\.agents/", "^voicebridge\\.py$"]
+
+[tool.vulture]
+# `.venv/bin/python -m vulture` — dead code in the engine (luacheck covers Lua,
+# knip covers the Raycast extension). Every submodule's `_pkg.name` cross-calls
+# read as real uses to vulture, same as any other attribute access.
+paths = ["voicebridge.py", "voicebridge", ".quality/dependency_edges.py"]
+min_confidence = 80
+
+[tool.coverage.run]
+# `coverage run --branch -m pytest` then `coverage lcov`; the gate merges the
+# LCOV with the Raycast and Lua reports into .quality/coverage/lcov.info.
+# .quality/dependency_edges.py is real, tested code (not generated gate
+# output), so only the generated coverage/ subdirectory is omitted, not all
+# of .quality/.
+branch = true
+source = ["."]
+omit = ["tests/*", ".venv/*", "raycast/*", ".agents/*", ".quality/coverage/*"]

@@ -15,6 +15,8 @@ import {
   buildFormats,
   callEngine,
   CONFIG_FORMAT_ID,
+  type DeliveredResult,
+  type EngineResult,
   flagsForFormat,
   FormatChoice,
   getInputText,
@@ -27,6 +29,84 @@ import { ResultView } from "./ResultView";
 interface PipelineFormProps {
   /** Prefill the text field from the current selection / clipboard. */
   prefillSelection: boolean;
+}
+
+type SubmitValues = {
+  text: string;
+  format: string;
+  translate: string;
+  backend: string;
+};
+
+/** Validation result for a submitted form: either the resolved body text +
+ * format to run, or the failure-toast title to show instead. Pure so the
+ * "is this submission even runnable" logic can be checked without a fake
+ * engine. */
+type Submission =
+  | { ok: true; body: string; fmt: FormatChoice }
+  | { ok: false; title: string };
+
+/** Resolve+validate a submission before touching the engine: non-empty text,
+ * and a resolvable format. */
+function resolveSubmission(
+  values: Pick<SubmitValues, "text" | "format">,
+  formats: FormatChoice[],
+): Submission {
+  const body = (values.text ?? "").trim();
+  if (!body) return { ok: false, title: "Type or select some text first" };
+  const fmt = resolveFormat(formats, values.format);
+  if (!fmt) return { ok: false, title: "No formats loaded" };
+  return { ok: true, body, fmt };
+}
+
+interface PipelineRunOptions {
+  translate: string;
+  backend: string;
+}
+
+interface PipelineRunResult {
+  res: EngineResult;
+  delivered: DeliveredResult;
+}
+
+/** Run one capture through the engine and resolve what it delivered. */
+async function runPipeline(
+  fmt: FormatChoice,
+  body: string,
+  opts: PipelineRunOptions,
+): Promise<PipelineRunResult> {
+  const flags = flagsForFormat(fmt, opts);
+  const res = await callEngine(["text", body, ...flags]);
+  const delivered = await resolveDelivery(res);
+  return { res, delivered };
+}
+
+/** Show a failure toast and stop — the shared tail of every early-return in
+ * onSubmit (bad input, no formats, or an unsuccessful delivery). */
+async function failSubmission(title: string, message?: string): Promise<void> {
+  await showToast({ style: Toast.Style.Failure, title, message });
+}
+
+/** Build the ResultView to push after a successful run. */
+function buildResultView(args: {
+  delivered: DeliveredResult;
+  formats: FormatChoice[];
+  values: Pick<SubmitValues, "backend" | "translate">;
+  fmt: FormatChoice;
+}) {
+  const { delivered, formats, values, fmt } = args;
+  return (
+    <ResultView
+      initialText={delivered.text ?? ""}
+      path={delivered.path}
+      llmFailed={delivered.llmFailed}
+      pasteFailed={delivered.pasteFailed}
+      backend={values.backend}
+      translate={values.translate}
+      formats={formats}
+      note={fmt.ai ? fmt.title : "Raw transcript"}
+    />
+  );
 }
 
 export function PipelineForm({ prefillSelection }: PipelineFormProps) {
@@ -53,60 +133,24 @@ export function PipelineForm({ prefillSelection }: PipelineFormProps) {
     };
   }, [prefillSelection]);
 
-  async function onSubmit(values: {
-    text: string;
-    format: string;
-    translate: string;
-    backend: string;
-  }) {
-    const body = (values.text ?? "").trim();
-    if (!body) {
-      await showToast({
-        style: Toast.Style.Failure,
-        title: "Type or select some text first",
-      });
-      return;
-    }
-    const fmt = resolveFormat(formats, values.format);
-    if (!fmt) {
-      await showToast({
-        style: Toast.Style.Failure,
-        title: "No formats loaded",
-      });
-      return;
-    }
+  async function onSubmit(values: SubmitValues) {
+    const submission = resolveSubmission(values, formats);
+    if (!submission.ok) return failSubmission(submission.title);
+    const { body, fmt } = submission;
     const toast = await showToast({
       style: Toast.Style.Animated,
       title: fmt.ai ? `Running — ${fmt.title}…` : "Cleaning up…",
     });
-    const flags = flagsForFormat(fmt, {
+    const { res, delivered } = await runPipeline(fmt, body, {
       translate: values.translate,
       backend: values.backend,
     });
-    const res = await callEngine(["text", body, ...flags]);
-    const delivered = await resolveDelivery(res);
     await toast.hide();
     // Classifies empty/error AND the exit-0-no-VB_STATUS "unknown" case, which
     // used to slip through to an empty result screen.
     const failure = deliveryFailure(delivered.kind, res);
-    if (failure) {
-      await showToast({
-        style: Toast.Style.Failure,
-        title: failure.title,
-        message: failure.message,
-      });
-      return;
-    }
-    push(
-      <ResultView
-        initialText={delivered.text ?? ""}
-        path={delivered.path}
-        llmFailed={delivered.llmFailed}
-        pasteFailed={delivered.pasteFailed}
-        formats={formats}
-        note={fmt.ai ? fmt.title : "Raw transcript"}
-      />,
-    );
+    if (failure) return failSubmission(failure.title, failure.message);
+    push(buildResultView({ delivered, formats, values, fmt }));
   }
 
   return (

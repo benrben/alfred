@@ -1,6 +1,10 @@
 {
   "root": true,
   "extends": ["@raycast"],
+  "env": {
+    "node": true
+  },
+  "ignorePatterns": ["raycast-env.d.ts"],
   "plugins": ["react-hooks"],
   "rules": {
     "react-hooks/rules-of-hooks": "error",

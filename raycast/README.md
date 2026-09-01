@@ -19,7 +19,10 @@ pickers default to **Default (config)**, which uses whatever you've set in
 ## Commands
 
 - **Dictate** — a live recorder (via `sox`): running timer + mic-level bar, the
-  active **output format** shown (`⌘F` to change it for this take). The engine
+  active **output format** shown (`⌘F` to change it for this take), and the
+  active **LLM backend** (`⌘B` to choose `codex`, `claude`, `local`, `auto`, or
+  the config default). The backend choice is kept with the recording, including
+  when you press Esc and later stop it from the menu bar. The engine
   **transcribes while you speak** (when the warm daemon is up), so the
   **transcript builds live** on screen and stopping is fast — only the last few
   seconds are left to process. **⏎** stops & transcribes. **⌃C** cancels; **Esc**
@@ -89,11 +92,14 @@ The two things it **can't** do, which you must grant once:
 Set in Raycast → Extensions → Alfred. All optional:
 
 - **Daemon Port** (default `8763`) — must match the engine's `serve` port.
-- **LLM Backend** / **Translate** — override per capture. **LLM Backend** offers
-  **local (on-device MLX)**, `auto`, `claude`, `codex`, or **Default (config)**.
-  `local` is strict on-device ($0, offline); `claude`/`codex` are keyless via your
-  CLI login. (The default *format* lives in config — set it in **Manage Intents**,
-  not here.)
+- **LLM Backend** / **Translate** — defaults for captures. Dictate also lets you
+  override the backend in-recording with `⌘B`; **LLM Backend** offers **local
+  (on-device MLX)**, `auto`, `claude`, `codex`, or **Default (config)**. `local`
+  is strict on-device ($0, offline); `claude`/`codex` use your existing CLI
+  login. To use Codex, run `codex login` once, then choose `Backend: codex` in
+  Dictate (or set it as the preference). Select an AI output format—or enable a
+  processing stage in config—for a backend choice to invoke an LLM; **Raw
+  transcript** intentionally never does.
 - **Python (venv)** / **Engine Script** / **sox Path** — only used to start the
   daemon or fall back when it's down; `~` is expanded.
 

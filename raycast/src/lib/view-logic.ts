@@ -33,6 +33,18 @@ export function levelBar(level: number, width = 22): string {
   return "█".repeat(filled) + "░".repeat(width - filled);
 }
 
+/** Fraction (0..1) of non-space, non-'|' characters in a VU-meter bracket's
+ * inner content, or null when there's nothing to measure (total === 0). */
+function fillFraction(segment: string): number | null {
+  let fill = 0;
+  let total = 0;
+  for (const ch of segment) {
+    total++;
+    if (ch !== " " && ch !== "|") fill++;
+  }
+  return total > 0 ? Math.min(1, fill / total) : null;
+}
+
 /**
  * Parse a sox `-S` VU-meter dump into a 0..1 level. sox writes a bracketed
  * segment containing a '|' centre mark; the fraction of non-space, non-'|'
@@ -44,15 +56,9 @@ export function parseLevel(data: string): number {
   const segs = data.split(/[\r\n]+/);
   for (let i = segs.length - 1; i >= 0 && i > segs.length - 8; i--) {
     const m = segs[i].match(/\[([^[\]]*\|[^[\]]*)\]/);
-    if (m) {
-      let fill = 0;
-      let total = 0;
-      for (const ch of m[1]) {
-        total++;
-        if (ch !== " " && ch !== "|") fill++;
-      }
-      if (total > 0) return Math.min(1, fill / total);
-    }
+    if (!m) continue;
+    const level = fillFraction(m[1]);
+    if (level !== null) return level;
   }
   return 0;
 }
@@ -174,6 +180,12 @@ export function reprocessBanner(fmt: FormatChoice): string {
 /** Banner after a successful free-text refine: echoes the instruction. */
 export function refinedBanner(instruction: string): string {
   return `✎ Refined: ${instruction}`;
+}
+
+/** Human-readable label for the backend selected on a result screen. */
+export function backendLabel(backend?: string): string {
+  const value = (backend || "default").trim();
+  return value === "default" ? "Default (config)" : value;
 }
 
 /**

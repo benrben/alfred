@@ -1,0 +1,11 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  // Every Raycast command (package.json "commands") is an entry point: src/<name>.tsx.
+  "entry": ["src/*.tsx"],
+  "project": ["src/**/*.{ts,tsx}"],
+  "ignoreDependencies": [
+    // Driven by the repository quality gate (.quality/quality-gate.json), not by a script here.
+    "@stryker-mutator/core",
+    "@stryker-mutator/vitest-runner"
+  ]
+}

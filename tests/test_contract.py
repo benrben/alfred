@@ -160,6 +160,19 @@ class ProgressWriterMatchesContract(unittest.TestCase):
                          ["Transcribing audio", "Cleaning up via local"])
         self.assertEqual(obj["phase"], "done")
 
+    def test_write_failure_is_swallowed_not_raised(self):
+        # _write is best-effort: never let a progress-file write failure raise
+        # into the pipeline it's merely reporting on.
+        orig_write_json = vb._atomic_write_json
+        vb._atomic_write_json = lambda *a, **k: (_ for _ in ()).throw(
+            OSError("disk full"))
+        try:
+            prog = vb._Progress()          # __init__ itself calls _write
+            prog.step("transcribing", "Transcribing audio")   # no raise either
+        finally:
+            vb._atomic_write_json = orig_write_json
+        self.assertFalse(self.tmp.exists())   # the failed write never landed
+
 
 class HistoryWriterMatchesContract(unittest.TestCase):
     """history_append writes a jsonl record matching the history schema, into

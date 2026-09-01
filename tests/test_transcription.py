@@ -106,6 +106,33 @@ class TranscribeSamplesRouting(unittest.TestCase):
                               whisper_translate=False)
         self.assertNotIn("initial_prompt", self.fake.calls[-1])
 
+    def test_decode_opts_merged_into_kwargs(self):
+        # The streaming path passes extra Whisper decode options (e.g. disabling
+        # condition_on_previous_text); they must reach mlx_whisper.transcribe.
+        vb.transcribe_samples(object(), _cfg(), language=None,
+                              whisper_translate=False,
+                              decode_opts={"condition_on_previous_text": False})
+        self.assertEqual(
+            self.fake.calls[-1].get("condition_on_previous_text"), False)
+
+    def test_missing_mlx_whisper_raises_install_hint(self):
+        # Simulate mlx-whisper not being installed the same way the stdlib import
+        # machinery reports it: sys.modules[name] = None makes any later
+        # `import name` raise ModuleNotFoundError (see test_missing_tomllib...
+        # in test_malformed_config.py for the same pattern).
+        saved = sys.modules.get("mlx_whisper")
+        sys.modules["mlx_whisper"] = None
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                vb.transcribe_samples(object(), _cfg(), language=None,
+                                      whisper_translate=False)
+            self.assertIn("mlx-whisper is not installed", str(ctx.exception))
+        finally:
+            if saved is None:
+                sys.modules.pop("mlx_whisper", None)
+            else:
+                sys.modules["mlx_whisper"] = saved
+
 
 class TranscribeBatchDelegates(unittest.TestCase):
     """transcribe(path,...) loads audio then delegates to transcribe_samples."""
@@ -160,6 +187,56 @@ class LoadAudio16k(unittest.TestCase):
         audio = vb._load_audio_16k(path)
         self.assertEqual(audio.dtype, np.float32)
         self.assertEqual(len(audio), 16000)        # round(8000 * 16000/8000)
+
+    def test_zero_length_non_16k_audio_is_returned_unresampled(self):
+        import numpy as np
+        # An empty buffer at a non-16k rate: the resample target length rounds
+        # to zero, so the resampler must hand back the (still-empty) buffer
+        # rather than interpolating onto a zero-length axis.
+        path = self._write_wav(np.zeros(0), 8000)
+        audio = vb._load_audio_16k(path)
+        self.assertEqual(audio.dtype, np.float32)
+        self.assertEqual(len(audio), 0)
+
+    def test_missing_numpy_dependency_raises_install_hint(self):
+        # Simulate numpy not being installed (same sys.modules[name] = None
+        # pattern as test_missing_tomllib_falls_back_to_defaults in
+        # test_malformed_config.py) so the dependency-check branch runs.
+        saved = sys.modules.get("numpy")
+        sys.modules["numpy"] = None
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                vb._load_audio_16k("/nonexistent/whatever.wav")
+            self.assertIn("missing dependency", str(ctx.exception))
+        finally:
+            if saved is None:
+                sys.modules.pop("numpy", None)
+            else:
+                sys.modules["numpy"] = saved
+
+    def test_raises_when_raw_pcm_fallback_is_also_empty(self):
+        # sf.read failing (un-finalized WAV) normally recovers via the raw PCM
+        # fallback; if THAT also comes back empty there is truly nothing to
+        # transcribe, so _load_audio_16k must raise rather than return silently.
+        import numpy as np
+        import soundfile as sf
+        path = self._write_wav(
+            np.linspace(-0.3, 0.3, 16000).astype("float32"), 16000)
+        orig_read = sf.read
+        orig_pcm = vb._read_pcm_f32
+
+        def boom(*a, **k):
+            raise RuntimeError("Error opening: System error")
+
+        sf.read = boom
+        vb._read_pcm_f32 = lambda *a, **k: np.zeros(0, dtype=np.float32)
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                vb._load_audio_16k(path)
+            self.assertIn("could not read audio", str(ctx.exception))
+        finally:
+            sf.read = orig_read
+            vb._read_pcm_f32 = orig_pcm
 
     def test_stereo_is_downmixed_to_mono(self):
         import numpy as np
