@@ -275,6 +275,11 @@ describe("formatHistoryTitle", () => {
     expect(formatHistoryTitle("   ")).toBe("(empty)");
     expect(formatHistoryTitle("")).toBe("(empty)");
   });
+
+  it("does not split an emoji at the truncation boundary", () => {
+    const title = "a".repeat(56) + "😀" + "b".repeat(10);
+    expect(formatHistoryTitle(title)).toBe("a".repeat(56) + "😀…");
+  });
 });
 
 describe("formatHistoryWhen", () => {
@@ -287,6 +292,7 @@ describe("formatHistoryWhen", () => {
   it("handles a missing/empty timestamp", () => {
     expect(formatHistoryWhen("")).toBe("");
     expect(formatHistoryWhen(undefined as unknown as string)).toBe("");
+    expect(formatHistoryWhen(123 as unknown as string)).toBe("");
   });
 });
 

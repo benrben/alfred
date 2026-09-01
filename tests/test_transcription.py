@@ -16,6 +16,8 @@ import importlib.util
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -105,6 +107,33 @@ class TranscribeSamplesRouting(unittest.TestCase):
         vb.transcribe_samples(object(), cfg, language=None,
                               whisper_translate=False)
         self.assertNotIn("initial_prompt", self.fake.calls[-1])
+
+    def test_concurrent_transcriptions_are_single_flight(self):
+        active = 0
+        peak = 0
+        guard = threading.Lock()
+
+        def slow_transcribe(*args, **kwargs):
+            nonlocal active, peak
+            with guard:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.04)
+            with guard:
+                active -= 1
+            return {"text": "ok", "language": "en"}
+
+        self.fake.transcribe = slow_transcribe
+        threads = [threading.Thread(
+            target=vb.transcribe_samples,
+            args=(object(), _cfg()),
+            kwargs={"language": None, "whisper_translate": False},
+        ) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(peak, 1)
 
 
 class TranscribeBatchDelegates(unittest.TestCase):

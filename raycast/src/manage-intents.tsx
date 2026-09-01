@@ -9,7 +9,7 @@ import {
   showToast,
   useNavigation,
 } from "@raycast/api";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   buildFormats,
   callEngine,
@@ -153,6 +153,7 @@ function IntentForm({ mode, onSaved }: { mode?: Mode; onSaved: () => void }) {
   const isNew = !mode;
   const [key, setKey] = useState(mode?.key ?? "");
   const [keyError, setKeyError] = useState<string | undefined>();
+  const submitting = useRef(false);
 
   async function onSubmit(values: {
     key?: string;
@@ -160,31 +161,37 @@ function IntentForm({ mode, onSaved }: { mode?: Mode; onSaved: () => void }) {
     description: string;
     prompt: string;
   }) {
+    if (submitting.current) return;
     const k = (isNew ? (values.key ?? "") : mode!.key).trim();
     const err = validateIntentKey(k);
     if (err) {
       setKeyError(err);
       return;
     }
+    submitting.current = true;
     const argv = ["set-intent", k, "--prompt", values.prompt ?? ""];
     if (values.label?.trim()) argv.push("--label", values.label.trim());
     if (values.description?.trim())
       argv.push("--description", values.description.trim());
 
-    const toast = await showToast({
-      style: Toast.Style.Animated,
-      title: "Saving…",
-    });
-    const res = await callEngine(argv);
-    if ((res.out || "").includes("saved")) {
-      toast.style = Toast.Style.Success;
-      toast.title = isNew ? `Added “${k}”` : `Saved “${k}”`;
-      onSaved();
-      pop();
-    } else {
-      toast.style = Toast.Style.Failure;
-      toast.title = "Could not save";
-      toast.message = lastErrorLine(res.err);
+    try {
+      const toast = await showToast({
+        style: Toast.Style.Animated,
+        title: "Saving…",
+      });
+      const res = await callEngine(argv);
+      if ((res.out || "").includes("saved")) {
+        toast.style = Toast.Style.Success;
+        toast.title = isNew ? `Added “${k}”` : `Saved “${k}”`;
+        onSaved();
+        pop();
+      } else {
+        toast.style = Toast.Style.Failure;
+        toast.title = "Could not save";
+        toast.message = lastErrorLine(res.err);
+      }
+    } finally {
+      submitting.current = false;
     }
   }
 

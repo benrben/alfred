@@ -132,6 +132,7 @@ do
   eq(H.fmtTime(65), "01:05", "fmtTime(65)")
   eq(H.fmtTime(600), "10:00", "fmtTime(600)")
   eq(H.fmtTime(3599), "59:59", "fmtTime(3599)")
+  eq(H.fmtTime(-5), "00:00", "fmtTime clamps negative durations")
 end
 
 -- =====================================================================

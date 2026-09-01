@@ -71,6 +71,12 @@ class ReasoningEffortFlags(unittest.TestCase):
             vb.run_llm_clean = orig
         self.assertNotIn("-c", captured["cmd"])
 
+    def test_extra_args_must_be_an_array_of_strings(self):
+        with self.assertRaisesRegex(RuntimeError, "array of strings"):
+            vb._claude_warm_cmd(cfg(claude_extra_args="--foo"))
+        with self.assertRaisesRegex(RuntimeError, "array of strings"):
+            vb.run_llm("codex", "hi", cfg(codex_extra_args=[1]))
+
 
 class RefineFeedback(unittest.TestCase):
     def setUp(self):

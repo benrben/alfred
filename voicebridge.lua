@@ -172,19 +172,18 @@ local refreshSettings, setModel
 -- ---- Small helpers -------------------------------------------------------
 
 function fmtTime(secs)
+  secs = math.max(0, tonumber(secs) or 0)
   return string.format("%02d:%02d", math.floor(secs / 60), secs % 60)
 end
 
 -- Ensure the owner-only ~/.voicebridge dir exists before we write into it (the
 -- engine creates it 0700 too; we chmod best-effort in case we win the race).
-local vbDirReady = false
 local function ensureVBDir()
-  if vbDirReady then return end
   if not hs.fs.attributes(VB_DIR) then
     hs.fs.mkdir(VB_DIR)
-    pcall(function() hs.fs.chmod(VB_DIR, 448) end)   -- 0700; no-op if unsupported
   end
-  vbDirReady = true
+  -- Tighten an existing directory too (restores/older installs may be 0755).
+  pcall(function() hs.fs.chmod(VB_DIR, 448) end)     -- 0700; no-op if unsupported
 end
 
 -- Off by default: the trace can contain dictation excerpts. Set true to write a
@@ -216,9 +215,11 @@ function notify(title, text, onClick)
   n:send()
 end
 
+local wavSeq = 0
 function tmpWav()
   local tmp = os.getenv("TMPDIR") or "/tmp/"
-  return tmp .. "voicebridge_" .. os.time() .. ".wav"
+  wavSeq = wavSeq + 1
+  return tmp .. "voicebridge_" .. os.time() .. "_" .. wavSeq .. ".wav"
 end
 
 -- Paste `text` into the frontmost app: put it on the clipboard, then (after a
@@ -570,7 +571,11 @@ local function classifyPost(status, hasBody)
 end
 
 -- `argv` starts at the subcommand (e.g. {"process", wav}); no python/script.
-function runEngine(argv)
+function runEngine(argv, recordingFinished)
+  if VB.state == "recording" or (VB.state == "processing" and not recordingFinished) then
+    hs.alert.show("Busy…", 0.8)
+    return false
+  end
   setState("processing")
   local cmd = buildEngineArgv(argv, VB.captureFlags, VB.backend)
   VB.captureFlags = nil
@@ -609,6 +614,7 @@ function runEngine(argv)
         notify("Alfred", "Still transcribing… the engine is taking a while.")
       end
     end)
+  return true
 end
 
 -- The result panel's button actions, injected into showResult so the panel
@@ -627,6 +633,7 @@ function resultPanelHandlers()
       pasteText(text)
     end,
     onEmail = function(text)
+      if VB.state ~= "idle" then hs.alert.show("Busy…", 0.8); return end
       closeResult()
       VB.captureFlags = { "--mode", "email" }
       runEngine({ "text", text })
@@ -713,6 +720,21 @@ end
 function onRecDone()
   destroyHUD()
   dbg("onRecDone state=" .. tostring(VB.state) .. " wav=" .. tostring(VB.wav))
+  VB.recTask = nil
+  if VB.cancelRecording then
+    VB.cancelRecording = nil
+    if VB.wav then os.remove(VB.wav) end
+    VB.wav = nil
+    VB.captureFlags = nil
+    setState("idle")
+    return
+  end
+  -- Sox ended by itself at MAX_RECORD_SECS. Treat that as a normal completed
+  -- recording instead of discarding the finalized WAV in a stuck UI state.
+  if VB.state == "recording" then
+    setState("processing")
+    notify("Alfred", "Maximum recording length reached — transcribing now.")
+  end
   -- sox exited (after we sent SIGINT). Process if the file has audio.
   if VB.state ~= "processing" then return end
   local f = io.open(VB.wav, "r")
@@ -720,7 +742,7 @@ function onRecDone()
   if f then size = f:seek("end"); f:close() end
   dbg("onRecDone size=" .. tostring(size))
   if size and size > 1024 then
-    runEngine({ "process", VB.wav })
+    runEngine({ "process", VB.wav }, true)
   else
     setState("idle")
     notify("Alfred", "Nothing recorded.")
@@ -794,12 +816,15 @@ end
 
 -- Show the format list; calls onPick(flags) with the chosen entry's flags.
 function pickMode(onPick)
+  if VB.chooser then hs.alert.show("Chooser already open…", 0.8); return end
   local chooser
   chooser = hs.chooser.new(function(choice)
+    VB.chooser = nil
     chooser = nil
     if not choice then return end     -- cancelled: do nothing
     onPick(choice.flags or {})
   end)
+  VB.chooser = chooser
   chooser:placeholderText("Choose output format…")
   chooser:searchSubText(true)
   chooser:rows(#MODES)
@@ -811,6 +836,7 @@ end
 function dictateWithMode()
   if VB.state ~= "idle" then hs.alert.show("Busy…", 0.8); return end
   pickMode(function(flags)
+    if VB.state ~= "idle" then hs.alert.show("Busy…", 0.8); return end
     VB.captureFlags = flags
     startRecording()
   end)
@@ -821,16 +847,20 @@ end
 -- rows stay visible while you type your message.
 function typePrompt()
   if VB.state ~= "idle" then hs.alert.show("Busy…", 0.8); return end
+  if VB.chooser then hs.alert.show("Chooser already open…", 0.8); return end
   local chooser
   chooser = hs.chooser.new(function(choice)
     local q = (chooser and chooser:query()) or ""
+    VB.chooser = nil
     chooser = nil
     if not choice then return end
+    if VB.state ~= "idle" then hs.alert.show("Busy…", 0.8); return end
     local text = q:gsub("^%s*(.-)%s*$", "%1")
     if #text == 0 then hs.alert.show("Type some text first", 1.0); return end
     VB.captureFlags = choice.flags or {}
     runEngine({ "text", text })
   end)
+  VB.chooser = chooser
   chooser:placeholderText("Type text, then pick a format ↵")
   chooser:queryChangedCallback(function() end)   -- disables row filtering
   chooser:choices(MODES)
@@ -1037,6 +1067,7 @@ function onWebMessage(message)
     VB.winTranslate = normalizeTranslate(d.value)
   elseif a == "processText" then
     if type(d.text) == "string" and #d.text > 0 then
+      if VB.state ~= "idle" then hs.alert.show("Busy…", 0.8); return end
       VB.captureFlags = windowCaptureFlags()
       runEngine({ "text", d.text })
     end
@@ -1253,7 +1284,11 @@ function openWindow()
     state = VB.state,
     settings = VB.settings or {},
   }
-  w:html(WIN_HEAD .. hs.json.encode(init) .. WIN_TAIL)
+  -- A literal </script> inside dictated/history text would end the enclosing
+  -- script element even though it is JSON-quoted. Escape every '<' in the
+  -- serialized payload; JavaScript decodes \u003c back to the original text.
+  local initJson = hs.json.encode(init):gsub("<", "\\u003c")
+  w:html(WIN_HEAD .. initJson .. WIN_TAIL)
   w:show():bringToFront()
 end
 
@@ -1386,8 +1421,16 @@ VB.menubar:setMenu(function()
     typePrompt = typePrompt,
     setBackend = function(v) VB.backend = v end,
     cancel = function()
-      if VB.recTask and VB.recTask:isRunning() then VB.recTask:terminate() end
-      if VB.state == "processing" then
+      if VB.state == "recording" and VB.recTask and VB.recTask:isRunning() then
+        -- Keep the UI non-idle until Sox's completion callback confirms the
+        -- process has exited. onRecDone removes this cancelled WAV and resets.
+        VB.cancelRecording = true
+        setState("processing")
+        destroyHUD()
+        VB.recTask:terminate()
+        hs.alert.show("Cancelling…", 0.8)
+        return
+      elseif VB.state == "processing" then
         VB.runId = (VB.runId or 0) + 1   -- invalidate any in-flight daemon result
         cancelWatchdog()
         if VB.engineTask then pcall(function() VB.engineTask:terminate() end); VB.engineTask = nil end

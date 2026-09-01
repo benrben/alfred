@@ -51,7 +51,7 @@ fi
 "$VENV/bin/python" -m pip install --upgrade pip >/dev/null
 echo "Installing engine deps (mlx-whisper, soundfile, numpy) — downloads MLX/torch,"
 echo "may take a few minutes the first time ..."
-"$VENV/bin/pip" install -r "$ROOT/requirements.txt"
+"$VENV/bin/pip" install -r "$ROOT/requirements.txt" -c "$ROOT/constraints.txt"
 
 # --- 3. sox (recorder) -----------------------------------------------------
 if command -v sox >/dev/null 2>&1; then
@@ -80,11 +80,16 @@ if ! command -v node >/dev/null 2>&1; then
   echo "ERROR: node not found. Install Node 22+ (e.g. 'brew install node')." >&2
   exit 1
 fi
+NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+if [[ "$NODE_MAJOR" -lt 22 ]]; then
+  echo "ERROR: Node 22+ is required; found $(node -v)." >&2
+  exit 1
+fi
 echo "Using node $(node -v) / npm $(npm -v)"
 
 # --- 6. Dependencies -------------------------------------------------------
-echo "Installing extension dependencies (npm install) ..."
-npm install
+echo "Installing extension dependencies from package-lock.json (npm ci) ..."
+npm ci
 
 # --- 7. Build (validates the manifest + TypeScript) ------------------------
 echo "Building ..."
@@ -94,7 +99,7 @@ npm run build
 echo
 echo "Running engine check (doctor) ..."
 echo
-"$VENV/bin/python" "$ROOT/voicebridge.py" doctor || true
+"$VENV/bin/python" "$ROOT/voicebridge.py" doctor
 echo
 
 # --- 9. Import into Raycast ------------------------------------------------

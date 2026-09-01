@@ -260,6 +260,9 @@ export default function Dictate(props: {
     const st = stateRef.current;
     if (!st) return;
     const fmt = currentFormat();
+    // Claim this recording synchronously before the first await/render. A
+    // double Enter or racing auto-stop then sees no state to finish twice.
+    stateRef.current = null;
     setPhase("transcribing");
     setProg(null);
     try {

@@ -40,6 +40,19 @@ def _free_port() -> int:
     return port
 
 
+class ContentLengthParsing(unittest.TestCase):
+    def test_rejects_malformed_and_negative_values(self):
+        for value in ("not-a-number", "-1", None):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError, "invalid Content-Length"
+            ):
+                vb._content_length({"Content-Length": value})
+
+    def test_accepts_missing_and_numeric_values(self):
+        self.assertEqual(vb._content_length({}), 0)
+        self.assertEqual(vb._content_length({"Content-Length": "12"}), 12)
+
+
 class ServeRoundTrip(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -163,6 +176,19 @@ class ServeRoundTrip(unittest.TestCase):
         c.close()
         self.assertEqual(r.status, 200)
         self.assertNotEqual(obj["code"], 0)
+        self.assertTrue(self._get("/")[1]["ok"])
+
+    def test_invalid_content_length_returns_json_error(self):
+        c = self._conn()
+        c.putrequest("POST", "/", skip_host=True, skip_accept_encoding=True)
+        c.putheader("Host", f"127.0.0.1:{self.port}")
+        c.putheader("Content-Length", "not-a-number")
+        c.endheaders()
+        r = c.getresponse()
+        obj = json.loads(r.read().decode())
+        c.close()
+        self.assertEqual(r.status, 400)
+        self.assertEqual(obj["error"], "invalid Content-Length")
         self.assertTrue(self._get("/")[1]["ok"])
 
     def test_cross_origin_post_is_refused(self):

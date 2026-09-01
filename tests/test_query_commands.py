@@ -140,6 +140,12 @@ class HistoryLedger(unittest.TestCase):
         self.assertIn("third item", lines[0])
         self.assertIn("first item", lines[2])
 
+    def test_limit_zero_lists_no_records(self):
+        rc, out = _run(vb.cmd_history,
+                       _ns(config=self._config_pointing_here(), limit=0, copy=None))
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+
     def test_copy_index_0_copies_most_recent(self):
         rc, out = _run(vb.cmd_history,
                        _ns(config=self._config_pointing_here(), limit=10, copy=0))

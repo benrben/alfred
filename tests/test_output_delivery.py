@@ -14,6 +14,8 @@ Run: ./.venv/bin/python -m pytest tests/test_output_delivery.py -q
 
 import os
 import sys
+import threading
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -90,6 +92,29 @@ class DeliverRouting(unittest.TestCase):
         self.assertEqual((kind, path, paste_ok), ("copied", None, True))
         self.assertEqual(sink.copied, ["hi"])
         self.assertEqual(sink.pastes, 1)
+
+    def test_concurrent_copy_and_paste_sequences_are_atomic(self):
+        class SharedSink(FakeSink):
+            def __init__(self):
+                super().__init__()
+                self.events = []
+            def copy(self, text):
+                self.events.append(("copy", text))
+                time.sleep(0.04)
+            def paste(self):
+                self.events.append(("paste", None))
+                return True
+
+        sink = SharedSink()
+        threads = [threading.Thread(
+            target=vb.deliver, args=(text, _cfg(), True, sink),
+        ) for text in ("first", "second")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual([event[0] for event in sink.events],
+                         ["copy", "paste", "copy", "paste"])
 
     def test_paste_failure_is_reported(self):
         # A sink whose paste() returns False -> deliver reports paste_ok=False.

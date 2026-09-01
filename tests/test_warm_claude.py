@@ -102,6 +102,13 @@ class WarmClaudeLifecycle(unittest.TestCase):
         finally:
             w._stop()
 
+    def test_replaced_instance_cannot_restart_itself(self):
+        w = self._warm(ECHO)
+        w.stop()
+        with self.assertRaisesRegex(RuntimeError, "replaced"):
+            w.ask("late request", timeout=1)
+        self.assertFalse(w._alive())
+
 
 class ShouldPrewarmClaude(unittest.TestCase):
     """The daemon's startup pre-warm must never spawn/prompt `claude` for

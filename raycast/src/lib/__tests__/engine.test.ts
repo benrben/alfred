@@ -250,6 +250,16 @@ describe("resolveDelivery", () => {
     expect(d.llmFailed).toBe(false);
   });
 
+  it("rejects a saved status with neither path nor result", async () => {
+    const { engine } = await freshEngine();
+    const d = await engine.resolveDelivery({
+      code: 0,
+      out: "VB_STATUS\tsaved",
+      err: "",
+    });
+    expect(d.kind).toBe("error");
+  });
+
   it("flags llm_failed from the trailing status field", async () => {
     const { engine, stub } = await freshEngine();
     stub.setClipboardText("partial");

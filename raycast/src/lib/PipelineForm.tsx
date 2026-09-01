@@ -9,7 +9,7 @@ import {
   showToast,
   useNavigation,
 } from "@raycast/api";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   BACKENDS,
   buildFormats,
@@ -34,6 +34,7 @@ export function PipelineForm({ prefillSelection }: PipelineFormProps) {
   const [formatId, setFormatId] = useState<string>(CONFIG_FORMAT_ID);
   const [text, setText] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const submitting = useRef(false);
   const { push } = useNavigation();
 
   useEffect(() => {
@@ -59,6 +60,7 @@ export function PipelineForm({ prefillSelection }: PipelineFormProps) {
     translate: string;
     backend: string;
   }) {
+    if (submitting.current) return;
     const body = (values.text ?? "").trim();
     if (!body) {
       await showToast({
@@ -75,38 +77,45 @@ export function PipelineForm({ prefillSelection }: PipelineFormProps) {
       });
       return;
     }
-    const toast = await showToast({
-      style: Toast.Style.Animated,
-      title: fmt.ai ? `Running — ${fmt.title}…` : "Cleaning up…",
-    });
-    const flags = flagsForFormat(fmt, {
-      translate: values.translate,
-      backend: values.backend,
-    });
-    const res = await callEngine(["text", body, ...flags]);
-    const delivered = await resolveDelivery(res);
-    await toast.hide();
-    // Classifies empty/error AND the exit-0-no-VB_STATUS "unknown" case, which
-    // used to slip through to an empty result screen.
-    const failure = deliveryFailure(delivered.kind, res);
-    if (failure) {
-      await showToast({
-        style: Toast.Style.Failure,
-        title: failure.title,
-        message: failure.message,
+    submitting.current = true;
+    setIsLoading(true);
+    try {
+      const toast = await showToast({
+        style: Toast.Style.Animated,
+        title: fmt.ai ? `Running — ${fmt.title}…` : "Cleaning up…",
       });
-      return;
+      const flags = flagsForFormat(fmt, {
+        translate: values.translate,
+        backend: values.backend,
+      });
+      const res = await callEngine(["text", body, ...flags]);
+      const delivered = await resolveDelivery(res);
+      await toast.hide();
+      // Classifies empty/error AND the exit-0-no-VB_STATUS "unknown" case, which
+      // used to slip through to an empty result screen.
+      const failure = deliveryFailure(delivered.kind, res);
+      if (failure) {
+        await showToast({
+          style: Toast.Style.Failure,
+          title: failure.title,
+          message: failure.message,
+        });
+        return;
+      }
+      push(
+        <ResultView
+          initialText={delivered.text ?? ""}
+          path={delivered.path}
+          llmFailed={delivered.llmFailed}
+          pasteFailed={delivered.pasteFailed}
+          formats={formats}
+          note={fmt.ai ? fmt.title : "Raw transcript"}
+        />,
+      );
+    } finally {
+      submitting.current = false;
+      setIsLoading(false);
     }
-    push(
-      <ResultView
-        initialText={delivered.text ?? ""}
-        path={delivered.path}
-        llmFailed={delivered.llmFailed}
-        pasteFailed={delivered.pasteFailed}
-        formats={formats}
-        note={fmt.ai ? fmt.title : "Raw transcript"}
-      />,
-    );
   }
 
   return (

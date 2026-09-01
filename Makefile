@@ -5,7 +5,7 @@
 #   make test-py     Python engine tests (pytest)
 #   make test-lua    Hammerspoon pure-helper tests (plain lua)
 #   make test-ts     Raycast extension tests (vitest)
-#   make lint        ruff (Python) + luacheck (Lua) + eslint (TS), best-effort
+#   make lint        ruff (Python) + luacheck (Lua) + eslint (TS)
 #   make typecheck   Raycast TypeScript typecheck
 #   make dev         install dev dependencies into the venv
 #   make coverage    Python coverage report
@@ -38,11 +38,11 @@ typecheck:
 
 lint:
 	@echo "── ruff ────────────────────────────────────────"
-	-$(PY) -m ruff check voicebridge.py tests/
+	$(PY) -m ruff check voicebridge.py tests/
 	@echo "── luacheck ────────────────────────────────────"
-	-luacheck voicebridge.lua tests/lua/ 2>/dev/null || echo "(luacheck not installed — brew install luacheck)"
+	luacheck voicebridge.lua tests/lua/
 	@echo "── eslint (raycast) ────────────────────────────"
-	-cd raycast && npm run lint:eslint
+	cd raycast && npm run lint:eslint
 
 dev:
 	$(PIP) install -r requirements-dev.txt

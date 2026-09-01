@@ -35,9 +35,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y lua5.4 luarocks
-          sudo luarocks install luacheck || true
-      - name: Lint (luacheck, non-blocking)
-        run: luacheck voicebridge.lua tests/lua/ || true
+          sudo luarocks install luacheck
+      - name: Lint (luacheck)
+        run: luacheck voicebridge.lua tests/lua/
       - name: Test (plain lua)
         run: VB_LUA_TEST=1 lua5.4 tests/lua/test_helpers.lua
 
@@ -50,7 +50,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: raycast/package-lock.json
       - run: npm ci

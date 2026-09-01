@@ -369,12 +369,13 @@ export async function callEngine(argv: string[]): Promise<EngineResult> {
   // Never blocks the call and never throws (loadContract resolves to the
   // literal fallback on any error).
   if (cachedContract === undefined) void loadContract();
+  const signal = AbortSignal.timeout(DAEMON_TIMEOUT_MS);
   try {
     const res = await fetch(daemonUrl("/"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ argv }),
-      signal: AbortSignal.timeout(DAEMON_TIMEOUT_MS),
+      signal,
     });
     if (res.ok) {
       const data = (await res.json()) as {
@@ -386,7 +387,21 @@ export async function callEngine(argv: string[]): Promise<EngineResult> {
       // daemons omit it (`?? ""`), so every error toast stays informative.
       return { code: data.code ?? 0, out: data.out ?? "", err: data.err ?? "" };
     }
+    return {
+      code: 1,
+      out: "",
+      err: `daemon returned HTTP ${res.status}; request was not replayed`,
+    };
   } catch {
+    // A timeout aborts only the client fetch; the daemon may still complete the
+    // LLM and delivery. Replaying here would duplicate cost/history/paste.
+    if (signal.aborted) {
+      return {
+        code: 1,
+        out: "",
+        err: "daemon request timed out; it may still be running and was not replayed",
+      };
+    }
     // daemon unavailable — fall through to a one-shot process
   }
   startDaemon(); // bring it up for next time
@@ -656,6 +671,9 @@ export async function resolveDelivery(
         // ignore
       }
     }
+    if (!path && text === undefined) {
+      return { kind: "error", llmFailed, pasteFailed };
+    }
     return { kind, path, text, llmFailed, pasteFailed };
   }
   return { kind, llmFailed, pasteFailed };
@@ -692,7 +710,8 @@ export function readHistory(limit = 50): HistoryItem[] {
     if (!line.trim()) continue;
     try {
       const rec = JSON.parse(line) as HistoryItem;
-      if (rec && typeof rec.text === "string") items.push(rec);
+      if (rec && typeof rec.text === "string" && typeof rec.ts === "string")
+        items.push(rec);
     } catch {
       // skip malformed line
     }
