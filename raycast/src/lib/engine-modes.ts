@@ -121,8 +121,8 @@ export function defaultFormatId(settings: Settings | null): string {
 }
 
 /** The selectable LLM backends (besides "Default = use config"). ONE source
- * feeding every picker (PipelineForm's dropdown here; the Hammerspoon
- * front-end has its own equivalent list) so adding/renaming a backend can't
+ * feeding every picker (PipelineForm's dropdown here, and any other view
+ * that lists backends) so adding/renaming a backend can't
  * silently drift out of sync with the engine's `--backend` choices again —
  * "local" (the engine's actual default: on-device MLX, no login, no network)
  * had dropped out of this form's dropdown before. */

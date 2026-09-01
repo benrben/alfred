@@ -1,10 +1,9 @@
 # Alfred — Raycast extension
 
-A Raycast front-end for the [Alfred](../README.md) engine (`voicebridge.py`),
-alongside the Hammerspoon one. It speaks the same contract: it prefers the warm
-daemon (`voicebridge.py serve`) over localhost HTTP and falls back to spawning
-the CLI if the daemon is down — so dictation reuses the already-loaded Whisper
-model and no API key is ever involved.
+The Raycast front-end for the [Alfred](../README.md) engine (`voicebridge.py`).
+It prefers the warm daemon (`voicebridge.py serve`) over localhost HTTP and
+falls back to spawning the CLI if the daemon is down — so dictation reuses the
+already-loaded Whisper model and no API key is ever involved.
 
 ## Formats (where Claude comes in)
 
@@ -61,8 +60,7 @@ cd raycast
 This is the **all-in-one** path — it sets up the engine (a Python `.venv` beside
 `voicebridge.py` with `mlx-whisper`), installs `sox`, writes a starter
 `config.toml` if you don't have one, then builds and imports the extension. It's
-idempotent, so re-run it any time. (It does **not** install Hammerspoon; run the
-[root `install.sh`](../install.sh) if you also want that front-end.)
+idempotent, so re-run it any time.
 
 It leaves a **permanent local install** — it runs at full speed; the
 "Development" label under Raycast → Extensions is just a category, and it stays
@@ -71,7 +69,7 @@ tied to this folder. After it finishes:
 1. Run **Engine Status** once to confirm the engine is reachable.
 2. Assign a hotkey to **Dictate** (and, if you want one-touch raw dictation,
    **Transcribe Only**) — Raycast → select the command → `⌘K` → Configure Command
-   → Hotkey. Avoid `⌥⌘D/I/T/V/R` if you also run the Hammerspoon front-end.
+   → Hotkey.
 
 To develop with hot-reload instead, run `npm install && npm run dev` and leave it
 running while you edit.
@@ -110,11 +108,11 @@ arguments the CLI takes (e.g. `["text", "…", "--mode", "email"]`,
 `["process", "/tmp/rec.wav"]`, `["modes"]`) — and reads back `{code, out}`. After
 a `process`/`text` run the engine copies the result to the clipboard (or saves a
 file) and prints a `VB_STATUS` line; the extension parses that to show the
-outcome, mirroring the Hammerspoon front-end.
+outcome.
 
 ## Not handled here
 
-Raycast can't show a *system-wide* floating HUD like the Hammerspoon front-end —
-the live timer and mic-level bar live inside the Dictate window rather than
-floating over every app. Everything else — formats, backends, models, translate,
-history — is shared through the engine.
+Raycast can't show a *system-wide* floating HUD — the live timer and mic-level
+bar live inside the Dictate window rather than floating over every app.
+Everything else — formats, backends, models, translate, history — is shared
+through the engine.

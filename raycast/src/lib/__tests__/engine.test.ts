@@ -176,8 +176,8 @@ describe("BACKENDS", () => {
     // Regression: PipelineForm's dropdown once hardcoded auto/claude/codex and
     // silently dropped "local" — the engine's actual default (on-device MLX,
     // no login, no network) — so the form could never select it. BACKENDS is
-    // the one list every picker (here and the Hammerspoon front-end) draws
-    // from now, so this single assertion guards them all.
+    // the one list every picker draws from now, so this single assertion
+    // guards them all.
     const { engine } = await freshEngine();
     expect(new Set(engine.BACKENDS)).toEqual(
       new Set(["local", "auto", "claude", "codex"]),

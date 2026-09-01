@@ -134,7 +134,7 @@ export function resolvedPath(
 // run many minutes, so this is generous (60 min); the cap only exists so a
 // recording that's dismissed and never stopped (the "Esc keeps recording" flow)
 // can't run forever and fill the disk / hold the mic. Applied as a sox
-// `trim 0 <secs>` output effect. Mirrors the Hammerspoon front-end's cap.
+// `trim 0 <secs>` output effect.
 export const MAX_RECORD_SECS = 3600;
 
 export function recorderArgs(wav: string): string[] {

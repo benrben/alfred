@@ -25,8 +25,8 @@ NO_CFG = "/nonexistent/alfred-test-config.toml"
 
 class FindTool(unittest.TestCase):
     """find_tool checks $PATH (shutil.which) first, then falls back to a
-    fixed list of extra bin dirs GUI launchers (Raycast, Hammerspoon) often
-    don't have on $PATH."""
+    fixed list of extra bin dirs a GUI launcher like Raycast often
+    doesn't have on $PATH."""
 
     def setUp(self):
         self._orig_which = shutil.which

@@ -23,7 +23,7 @@
       "**/*.spec.*",
       "**/*.config.*"
     ],
-    "extensions": [".py", ".pyi", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".lua"]
+    "extensions": [".py", ".pyi", ".ts", ".tsx", ".js", ".mjs", ".cjs"]
   },
   "test": {
     "command": ["make", "test"],
@@ -34,7 +34,6 @@
     "required": true,
     "commands": [
       [".venv/bin/python", "-m", "ruff", "check", "voicebridge.py", "voicebridge", "tests", ".quality/dependency_edges.py"],
-      ["luacheck", "voicebridge.lua", "voicebridge_lua", "tests/lua"],
       ["npm", "--prefix", "raycast", "run", "lint:eslint"],
       ["raycast/node_modules/.bin/prettier", "--check", "raycast/src"]
     ],
@@ -68,14 +67,12 @@
     "command": null,
     "report": null,
     "coverage_commands": [
-      ["mkdir", "-p", ".quality/coverage/python", ".quality/coverage/lua"],
+      ["mkdir", "-p", ".quality/coverage/python"],
       [".venv/bin/python", "-m", "coverage", "erase"],
       [".venv/bin/python", "-m", "coverage", "run", "--branch", "-m", "pytest", "-q"],
       [".venv/bin/python", "-m", "coverage", "lcov", "-o", "{root}/.quality/coverage/python/lcov.info"],
       ["raycast/node_modules/.bin/vitest", "run", "--root", "raycast", "--coverage", "--coverage.reporter=lcov", "--coverage.reportsDirectory={root}/.quality/coverage/raycast"],
-      ["env", "VB_LUA_TEST=1", "lua", "-lluacov", "tests/lua/test_helpers.lua"],
-      ["luacov", "-r", "lcov"],
-      ["python3", "/Users/benreich/.claude/skills/code-discipline/scripts/repo_quality_gate.py", "--merge-lcov", "{root}/.quality/coverage/lcov.info", "={root}/.quality/coverage/python/lcov.info", "raycast={root}/.quality/coverage/raycast/lcov.info", "={root}/.quality/coverage/lua/lcov.info"]
+      ["python3", "/Users/benreich/.claude/skills/code-discipline/scripts/repo_quality_gate.py", "--merge-lcov", "{root}/.quality/coverage/lcov.info", "={root}/.quality/coverage/python/lcov.info", "raycast={root}/.quality/coverage/raycast/lcov.info"]
     ],
     "coverage_report": ".quality/coverage/lcov.info",
     "coverage_format": "lcov",

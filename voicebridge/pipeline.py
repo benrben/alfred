@@ -425,7 +425,7 @@ def refine_text(text: str, instruction: str, cfg: dict) -> str:
 
 def _macos_tool(name: str) -> str:
     """Absolute path to a stock macOS binary, so we don't depend on $PATH (which
-    a GUI launcher like Hammerspoon may strip down)."""
+    a GUI launcher like Raycast may strip down)."""
     for base in ("/usr/bin/", "/bin/"):
         if os.path.exists(base + name):
             return base + name
@@ -469,7 +469,7 @@ class MacosSink(Sink):
     def copy(self, text: str) -> None:
         # We hand pbcopy UTF-8 bytes, but pbcopy decodes its stdin using the
         # locale (LANG / __CF_USER_TEXT_ENCODING). A GUI launcher
-        # (Raycast/Hammerspoon) can spawn us with no/!UTF-8 locale, in which
+        # like Raycast can spawn us with no/!UTF-8 locale, in which
         # case pbcopy reads our UTF-8 as Mac Roman and the clipboard gets
         # mojibake (Hebrew -> "◊©◊ú◊ï◊ù"). Force a UTF-8 locale for pbcopy so it
         # always matches the bytes we send.

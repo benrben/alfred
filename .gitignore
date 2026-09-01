@@ -22,8 +22,6 @@ htmlcov/
 .quality/quality-gate-state.json
 .quality/quality-gate-report.html
 .quality/smoke-home/
-luacov.stats.out
-luacov.report.out
 
 # Project-local skill installs (a stale/duplicate code-discipline copy; the
 # canonical one this repo's gate uses is ~/.claude/skills/code-discipline).

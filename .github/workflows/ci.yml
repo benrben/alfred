@@ -1,10 +1,9 @@
 name: CI
 
-# The three suites were deliberately built to run without a model or Apple
+# The two suites were deliberately built to run without a model or Apple
 # Silicon: the voicebridge/ engine package lazy-imports mlx_* inside functions
 # and the tests stub them, so the Python job needs only numpy/soundfile/tomlkit
-# — no mlx wheels — and runs on plain Ubuntu. Lua needs only a lua binary;
-# Raycast only Node.
+# — no mlx wheels — and runs on plain Ubuntu. Raycast only needs Node.
 
 on:
   push:
@@ -27,20 +26,6 @@ jobs:
         run: ruff check voicebridge.py voicebridge tests/ .quality/dependency_edges.py
       - name: Test
         run: python -m pytest tests/ -q
-
-  lua:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install lua + luacheck
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y lua5.4 luarocks
-          sudo luarocks install luacheck || true
-      - name: Lint (luacheck, non-blocking)
-        run: luacheck voicebridge.lua voicebridge_lua tests/lua/ || true
-      - name: Test (plain lua)
-        run: VB_LUA_TEST=1 lua5.4 tests/lua/test_helpers.lua
 
   raycast:
     runs-on: ubuntu-latest

@@ -1,7 +1,7 @@
 /**
  * Alfred engine client for Raycast.
  *
- * Speaks the same tiny contract the Hammerspoon front-end uses:
+ * Speaks the engine's tiny IPC contract:
  *   - prefer the warm daemon (`voicebridge.py serve`) over localhost HTTP:
  *       POST {"argv":[...]} -> {"code":int,"out":"<captured stdout>"}
  *   - fall back to spawning `voicebridge.py <argv>` as a one-shot if it's down,
@@ -9,7 +9,7 @@
  *
  * After a `process`/`text` run (no --stdout) the engine copies the result to the
  * clipboard or saves it to a file and prints a machine-readable `VB_STATUS` line;
- * resolveDelivery() reads that back, mirroring the .lua's onResult().
+ * resolveDelivery() reads that back.
  *
  * This file is a barrel: the implementation lives in engine-env.ts (prefs,
  * environment, locating the script), engine-contract.ts (the IPC contract +

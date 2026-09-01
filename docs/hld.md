@@ -8,18 +8,15 @@ optionally translates and reshapes it for an intent, then delivers the result to
 the clipboard, the active application, or a file. It supports Hebrew and other
 Whisper-supported languages.
 
-The architecture deliberately separates a reusable local engine from user
-interfaces. This allows the Hammerspoon and Raycast front ends to offer the
-same capabilities without duplicating transcription, configuration, LLM, or
-delivery logic.
+The architecture deliberately separates a reusable local engine from the user
+interface. This lets the Raycast front end offer its full capabilities without
+duplicating transcription, configuration, LLM, or delivery logic.
 
 ## 2. Architecture overview
 
 ```mermaid
 flowchart LR
-  U[User] --> H[Hammerspoon front end\nvoicebridge.lua]
-  U --> R[Raycast extension\nraycast/src]
-  H -->|localhost HTTP preferred\nCLI fallback| E
+  U[User] --> R[Raycast extension\nraycast/src]
   R -->|localhost HTTP preferred\nCLI fallback| E[Python engine\nvoicebridge.py]
   E -->|recorded WAV| S[MLX Whisper\non-device STT]
   E --> P[Processing pipeline]
@@ -28,7 +25,6 @@ flowchart LR
   P -. optional backend .-> X[Signed-in Codex CLI]
   E --> D[Clipboard / auto-paste / saved file]
   E --> F[Local state and history\n~/.voicebridge]
-  H --> F
   R --> F
 ```
 
@@ -37,7 +33,6 @@ flowchart LR
 | Component | Responsibility |
 | --- | --- |
 | `voicebridge.py` | System of record for CLI commands, configuration, STT, streaming sessions, optional LLM processing, output delivery, history, progress, and the local HTTP daemon. |
-| `voicebridge.lua` | Hammerspoon integration: global hotkeys, `sox` recording, menu bar, floating recording HUD, result controls, and the larger Alfred window. |
 | `raycast/` | TypeScript/Raycast integration: Dictate, Transcribe Only, text transformation, intents, history, menu bar, and status views. |
 | `config.toml` | User-controlled configuration. Loaded from `~/.config/voicebridge/config.toml`, with an engine-local fallback. `config.example.toml` documents supported settings. |
 | `sox` | Captures microphone input as the daemon-contract WAV format: 16 kHz, mono, signed 16-bit WAV. |
@@ -48,7 +43,7 @@ flowchart LR
 
 ### Dictation
 
-1. A front end starts `sox` and creates a temporary WAV recording.
+1. The front end starts `sox` and creates a temporary WAV recording.
 2. When the warm daemon is available, the front end sends `stream-start` and
    the engine incrementally transcribes the growing WAV. It emits partial
    transcript state for a live UI preview.
@@ -75,9 +70,9 @@ silently truncated by the local model's generation limit.
 
 ## 4. Engine interfaces and contract
 
-The engine is both a command-line program and an optional loopback daemon.
-Front ends use the daemon for low latency and fall back to spawning the CLI when
-it is unavailable.
+The engine is both a command-line program and an optional loopback daemon. The
+front end uses the daemon for low latency and falls back to spawning the CLI
+when it is unavailable.
 
 | Interface | Contract |
 | --- | --- |
@@ -86,8 +81,8 @@ it is unavailable.
 | Result protocol | Front-end-driven capture commands finish with `VB_RESULT` (JSON text) followed by a final `VB_STATUS` line. Status reports `copied`, `saved`, `empty`, `streaming`, or `error` and may include failure detail. |
 | State files | Atomic, owner-only JSON files publish progress and stream previews. History is stored as owner-only JSONL. The `contract` command supplies paths and schemas, including config-aware history location. |
 
-The engine owns this contract in its `CONTRACT` structure. Front ends retrieve
-it and retain a versioned fallback for older engine versions. Additive contract
+The engine owns this contract in its `CONTRACT` structure. The front end
+retrieves it and retains a versioned fallback for older engine versions. Additive contract
 changes are expected to be backward compatible; a schema-version major change
 signals incompatibility.
 
@@ -159,15 +154,15 @@ compatibility. A failed paste is surfaced separately from a successful copy.
 - Progress, preview, and history writes are best effort; their failure does not
   replace a successful primary capture. History is appended before delivery so
   an output failure does not lose an otherwise successful result.
-- Errors are converted to a final machine-readable status wherever a front end
-  drives the command, including STT, LLM, runtime, and delivery errors.
+- Errors are converted to a final machine-readable status wherever the front
+  end drives the command, including STT, LLM, runtime, and delivery errors.
 
 ## 9. Deployment and operations
 
-The repository is script-first rather than a packaged service. `install.sh`
-creates the Python virtual environment, installs dependencies, and writes a
-starter configuration. `raycast/install.sh` additionally builds/imports the
-Raycast extension. Hammerspoon loads `voicebridge.lua` from its configuration.
+The repository is script-first rather than a packaged service.
+`raycast/install.sh` creates the Python virtual environment, installs
+dependencies, writes a starter configuration, and builds/imports the Raycast
+extension.
 
 The supported runtime target is an Apple Silicon Mac with Python, `sox`, and
 the required macOS microphone/accessibility permissions. The `doctor` command
@@ -177,12 +172,11 @@ diagnosis without duplicating engine internals.
 
 ## 10. Testing boundaries
 
-The project has three complementary test suites:
+The project has two complementary test suites:
 
 - Python tests validate the engine, CLI flags, pipeline, streaming, contracts,
   configuration, output delivery, fallback behavior, and HTTP server.
-- Lua tests exercise Hammerspoon helpers without requiring Hammerspoon itself.
 - Vitest tests cover the Raycast engine client and UI logic.
 
-`make test` runs all three suites; `make lint` and `make typecheck` provide the
+`make test` runs both suites; `make lint` and `make typecheck` provide the
 corresponding static checks.

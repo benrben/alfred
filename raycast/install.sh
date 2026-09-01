@@ -8,8 +8,7 @@
 #   3. a starter config.toml (if you don't have one)
 #   4. the Raycast extension: npm deps, build, and import into Raycast
 #
-# Re-running it is safe (idempotent). It does NOT install Hammerspoon — this is
-# the Raycast front-end; run ../install.sh if you also want the Hammerspoon one.
+# Re-running it is safe (idempotent).
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -161,8 +160,7 @@ Next:
      may take ~30s while it downloads/loads the model.)
   2. Assign a hotkey to "Dictate" (and "Transcribe Only" for one-touch raw
      dictation) — Raycast: select it -> Cmd+K ->
-     Configure Command -> Hotkey. Avoid Cmd+Opt+D/I/T/V/R if you also
-     run the Hammerspoon front-end.
+     Configure Command -> Hotkey.
   3. First dictation prompts for Microphone access for Raycast — allow it.
 
 The extension shows under Raycast Settings -> Extensions as a

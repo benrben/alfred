@@ -38,15 +38,15 @@ ignore_missing_imports = true  # mlx_*, soundfile, tomlkit ship no stubs
 exclude = ["^\\.venv/", "^raycast/", "^\\.agents/", "^voicebridge\\.py$"]
 
 [tool.vulture]
-# `.venv/bin/python -m vulture` — dead code in the engine (luacheck covers Lua,
-# knip covers the Raycast extension). Every submodule's `_pkg.name` cross-calls
+# `.venv/bin/python -m vulture` — dead code in the engine (knip covers the
+# Raycast extension). Every submodule's `_pkg.name` cross-calls
 # read as real uses to vulture, same as any other attribute access.
 paths = ["voicebridge.py", "voicebridge", ".quality/dependency_edges.py"]
 min_confidence = 80
 
 [tool.coverage.run]
 # `coverage run --branch -m pytest` then `coverage lcov`; the gate merges the
-# LCOV with the Raycast and Lua reports into .quality/coverage/lcov.info.
+# LCOV with the Raycast report into .quality/coverage/lcov.info.
 # .quality/dependency_edges.py is real, tested code (not generated gate
 # output), so only the generated coverage/ subdirectory is omitted, not all
 # of .quality/.

@@ -403,7 +403,7 @@ def _doctor_macos_permissions() -> None:
     print("-" * 40)
     print(
         f"{_DOCTOR_WARN}auto-paste needs Accessibility granted to the app that runs "
-        "Alfred (Raycast/Hammerspoon) in System Settings ▸ Privacy ▸ "
+        "Alfred (Raycast) in System Settings ▸ Privacy ▸ "
         "Accessibility; the mic needs it per-app too. (Copy mode needs "
         "neither.)"
     )

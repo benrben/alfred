@@ -113,8 +113,8 @@ def _clean_env(drop: list[str]) -> dict:
     env.setdefault("LC_ALL", "en_US.UTF-8")
     env.setdefault("PYTHONUTF8", "1")
     # claude/codex read their OAuth login from the macOS Keychain, whose lookup
-    # needs the user identity in the env. GUI launchers (Raycast, Hammerspoon)
-    # can spawn us without USER set, in which case claude reports "Not logged in"
+    # needs the user identity in the env. A GUI launcher like Raycast can spawn
+    # us without USER set, in which case claude reports "Not logged in"
     # and the whole LLM step fails. Backfill it from the OS so we don't depend on
     # the launcher's environment.
     if not env.get("USER"):

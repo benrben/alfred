@@ -33,7 +33,7 @@ export function expandHome(p: string): string {
 }
 
 /** A login-ish PATH so the engine (and the claude/codex it spawns) resolves even
- * though Raycast launches us with a trimmed environment. Mirrors the .lua. */
+ * though Raycast launches us with a trimmed environment. */
 function enrichedPath(): string {
   const extra = [
     "/opt/homebrew/bin",

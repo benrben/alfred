@@ -295,8 +295,8 @@ def cmd_serve(args) -> int:
 
         def do_POST(self):
             # CSRF / DNS-rebinding guards: reject a non-loopback Host and any
-            # cross-Origin POST. Legit callers (Node fetch to localhost,
-            # Hammerspoon hs.http) send no Origin; a browser page always does.
+            # cross-Origin POST. A legit caller (Node fetch to localhost) sends
+            # no Origin; a browser page always does.
             if not _loopback_host(self.headers):
                 self._json(403, {"error": "bad host"})
                 return

@@ -117,8 +117,8 @@ DAEMON_PORT = 8763
 # ----------------------------------------------------------------------------
 # CONTRACT — the single source of IPC truth
 # ----------------------------------------------------------------------------
-# Everything the two front-ends (Hammerspoon / Raycast) need to talk to this
-# engine: the daemon's HTTP shape, the VB_STATUS status-line grammar, the state
+# Everything the Raycast front-end needs to talk to this engine: the daemon's
+# HTTP shape, the VB_STATUS status-line grammar, the state
 # files it writes (their paths + JSON schema), and where config is searched.
 # The writers below DERIVE their paths/format from this dict, so no path string
 # or status sentinel is duplicated. `contract_paths()` expands the "~/..."

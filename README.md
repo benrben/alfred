@@ -18,12 +18,11 @@ The Raycast **Dictate** view shows a live **per-step stopwatch** while it works
 (Transcribing → Translating & cleaning up → Delivering), so you always see what
 it's doing and how long each step takes.
 
-This is a working **V1**: an engine plus pluggable front-ends that talk over a
+This is a working **V1**: an engine plus a Raycast front-end that talk over a
 tiny CLI / localhost-HTTP contract.
 
 - **`voicebridge.py`** — the engine (STT + LLM + output). Works standalone in a terminal.
-- **`voicebridge.lua`** — the Hammerspoon front-end (global hotkeys, recording, menu bar, typed input).
-- **`raycast/`** — a Raycast extension front-end (dictate, transform text, manage
+- **`raycast/`** — the Raycast extension front-end (dictate, transform text, manage
   intents, history, menu bar). Install with `bash raycast/install.sh`; see
   [raycast/README.md](raycast/README.md).
 
@@ -34,17 +33,19 @@ tiny CLI / localhost-HTTP contract.
 - Apple Silicon Mac (M1+) — required by `mlx-whisper`.
 - `python3` (3.11+ recommended), Homebrew.
 - `sox` for recording: `brew install sox`.
-- Hammerspoon for hotkeys: `brew install --cask hammerspoon`.
+- Raycast for hotkeys and every command UI: [raycast.com](https://raycast.com).
 - For translate/rewrite/optimize: either the default **on-device** model
   (`mlx-lm`, installed automatically — first use downloads ~2GB), or the
   `claude` and/or `codex` CLI signed in (keyless). Raw transcription needs neither.
 
 ## Install
 
-1. From this folder, run the installer (creates `.venv`, installs deps, writes a starter config):
+1. From this folder, run the installer (creates the engine's `.venv`, installs
+   Whisper deps and `sox`, writes a starter config, then builds and imports the
+   extension into Raycast):
 
    ```bash
-   bash install.sh
+   bash raycast/install.sh
    ```
 
 2. (Optional) Sign in to an LLM CLI once — raw transcription works without this:
@@ -54,14 +55,9 @@ tiny CLI / localhost-HTTP contract.
    codex login    # Sign in with ChatGPT    — Codex
    ```
 
-3. Wire up the hotkeys. Open Hammerspoon once, then add to `~/.hammerspoon/init.lua`:
-
-   ```lua
-   dofile(os.getenv("HOME") .. "/Claude/Projects/alfred/voicebridge.lua")
-   ```
-
-   Choose **Reload Config** from the Hammerspoon menu. Grant **Accessibility** and
-   **Microphone** when prompted (System Settings → Privacy & Security).
+3. Grant **Accessibility** and **Microphone** to Raycast when macOS prompts
+   (System Settings → Privacy & Security) — auto-paste needs the former, the
+   first dictation needs the latter.
 
 Check everything at once:
 
@@ -69,70 +65,48 @@ Check everything at once:
 ./.venv/bin/python voicebridge.py doctor
 ```
 
-### (Optional) Raycast front-end
-
-Prefer Raycast over Hammerspoon, or want both? Install the extension:
-
-```bash
-bash raycast/install.sh
-```
-
-It installs deps, builds, and imports the extension into Raycast (dictate,
-transform text, manage intents, history, menu bar, engine status). See
-[raycast/README.md](raycast/README.md) for usage and hotkeys.
+See [raycast/README.md](raycast/README.md) for the full command reference,
+hotkey setup, and preferences.
 
 ## Use
 
-- **Cmd+Option+D** — dictate (uses your config's mode). Press once to start, again to stop.
-- **Cmd+Option+I** — dictate *with intent*: pick a format first, then speak.
-- **Cmd+Option+R** — **transcribe only**: record and get the raw transcript, no LLM
-  (no translate/rewrite/optimize). Fast and fully private.
-- **Cmd+Option+T** — type a line and run it through the same pipeline.
-- **Cmd+Option+V** — open the **Alfred window** (see [below](#the-alfred-window)).
-- The menu-bar icon shows state (🎙️ idle / 🔴 recording / ⏳ processing) and has a menu
-  (Open window, Dictate, Transcribe only, Dictate as…, Type…, Backend ▸, Restart engine,
-  Reload intent modes).
+Open Raycast and search **Alfred**:
 
-While recording, a floating **HUD** shows a live `mm:ss` timer and a mic-level
-meter so you can see it's actually hearing you. When a result is ready, a small
-**panel** appears with the cleaned text and **Copy / Paste / Email / ✕** buttons
-(Paste sends it straight to the app you were in; the panel auto-dismisses after
-20s).
+- **Dictate** — press once to start recording, `⏎` (or press again) to stop &
+  transcribe. Shows a live per-step stopwatch (Transcribing → Translating &
+  cleaning up → Delivering) and a transcript that builds live while you talk.
+- **Transcribe Only** — the same recorder pinned to a raw transcript: no
+  translate/rewrite/optimize. Fast and fully private.
+- **Type & Process** — type a line and run it through the same pipeline.
+- **Transform Text** — prefilled from your selection or clipboard; pick a
+  format and run.
+- **Manage Intents** — see the default format (starred), set a new default,
+  and edit/add the rewrite prompt behind each one.
+- **History** — browse and re-copy recent results.
+- **Alfred Menu Bar** — recording state plus one-click access to every command.
+- **Engine Status** — daemon health, current defaults, and `doctor` output.
 
-For a one-off format override, hit **Cmd+Option+I** (or **Dictate as…** / **Type…**
-from the menu): a picker lets you choose Email, Message, Commit, Prompt, Notes,
-Cleanup-only, your own custom modes, or a pure no-LLM transcript for that capture
-— without editing your config. The picker is populated from the engine, so
-custom `[intent]` modes (see [Configure](#configure)) appear automatically.
+Assign a hotkey to any command from Raycast (select it → `⌘K` → Configure
+Command → Hotkey) — see [raycast/README.md](raycast/README.md) for the full
+command reference and preferences.
 
-Switch the **LLM backend** live from the menu (**Backend ▸ auto / claude / codex**);
-it applies to subsequent captures on top of your config default.
+For a one-off format override, use `⌘F` in Dictate/Transform Text: a picker
+lets you choose Email, Message, Commit, Prompt, Notes, Cleanup-only, your own
+custom modes, or a pure no-LLM transcript for that capture — without editing
+your config. The picker is populated from the engine, so custom `[intent]`
+modes (see [Configure](#configure)) appear automatically.
 
-Change hotkeys (and toggle the level meter with `SHOW_METER`) at the top of
-`voicebridge.lua`.
-
-### The Alfred window
-
-**Cmd+Option+V** (or **Open Alfred window** from the menu) opens a panel that
-puts the whole pipeline in one place:
-
-- a **Record** button (same toggle as the hotkey) with a live level meter;
-- a **type box** — write a line and press ⏎ to run it through the pipeline;
-- **Format / intent**, **LLM backend**, and per-backend **model** dropdowns;
-- a **Translate to English** toggle;
-- an inline **Edit prompt** editor to tweak an intent's prompt and save it; and
-- the cleaned **result** (Copy / Paste) plus recent **history** (click to re-copy).
-
-Settings you change here apply to the next capture; model and intent-prompt
-edits are written back to your config.
+Switch the **LLM backend** live with `⌘B` in Dictate (`local` / `auto` /
+`claude` / `codex`); it applies to that capture on top of your config default.
 
 ### Speed (warm engine)
 
 The front-end keeps a **warm engine** running in the background — a small
 localhost daemon (`voicebridge.py serve`) that holds the Whisper model in memory
-so each dictation skips the multi-second model load. It starts automatically and
-survives Hammerspoon reloads; if it ever wedges, choose **Restart engine (warm)**
-from the menu. (The very first run still downloads the model once.)
+so each dictation skips the multi-second model load. It starts automatically in
+the background; if it ever wedges, **Engine Status** shows the problem and
+`voicebridge.py doctor` can restart it. (The very first run still downloads
+the model once.)
 
 The LLM step also runs at **low reasoning effort** by default (claude `--effort
 low`, codex `model_reasoning_effort=low`) — deep "thinking" isn't needed to clean
@@ -229,10 +203,12 @@ reads a token — it just uses the CLI you already authenticated.
 
 - **`doctor` flags a missing piece** — follow its hint (`brew install sox`,
   `pip install ...`, sign in to a CLI).
-- **Hotkey does nothing** — grant Hammerspoon Accessibility; confirm the
-  `dofile(...)` line and Reload Config; check the Hammerspoon console.
-- **"Could not launch the engine"** — fix the `PYTHON`/`SCRIPT`/`SOX` paths at
-  the top of `voicebridge.lua` (Hammerspoon needs absolute paths).
+- **Hotkey does nothing** — confirm you assigned one in Raycast (select the
+  command → `⌘K` → Configure Command → Hotkey); a command with no hotkey only
+  launches from the Raycast search bar.
+- **"Could not launch the engine"** — check the **Python (venv)** / **Engine
+  Script** / **sox Path** preferences under Raycast → Extensions → Alfred (see
+  [raycast/README.md](raycast/README.md#preferences)).
 - **LLM step fails** — the engine still copies the **raw transcript** so nothing
   is lost; the notification says so. Test the CLI directly:
   `echo hi | claude -p "reply ok"`.
@@ -243,30 +219,27 @@ reads a token — it just uses the CLI you already authenticated.
 ```
 voicebridge.py          entry-point shim (`python3 voicebridge.py ...`)
 voicebridge/            the engine / CLI package
-voicebridge.lua         Hammerspoon front-end (entry point + shared config/state)
-voicebridge_lua/        HUD/engine/capture/window sections voicebridge.lua loads
-raycast/                Raycast extension (second front-end)
+raycast/                Raycast extension (front-end)
 config.example.toml     all settings, documented
 requirements.txt        Python deps (floating intent)
 constraints.txt         pinned known-good versions (lockfile)
-install.sh              setup + environment check
 Makefile                dev tasks (make test / lint / typecheck)
 ```
 
 ## Development
 
-The three front-ends carry three test suites (Python engine, Hammerspoon pure
-helpers, Raycast/TS). One entry point runs them all (each is <10s):
+The engine and the Raycast extension each carry their own test suite. One
+entry point runs both (each is <10s):
 
 ```bash
 make dev      # once: install pytest + ruff into the venv
-make test     # run all three suites (Python + Lua + Raycast)
-make lint     # ruff + luacheck + eslint
+make test     # run both suites (Python + Raycast/TS)
+make lint     # ruff + eslint
 ```
 
-Or individually: `make test-py`, `make test-lua`, `make test-ts`. CI
-(`.github/workflows/ci.yml`) runs all three on every push/PR — on plain Ubuntu,
-since the suites stub the MLX models (no Apple-Silicon wheels needed).
+Or individually: `make test-py`, `make test-ts`. CI
+(`.github/workflows/ci.yml`) runs both on every push/PR — on plain Ubuntu,
+since the suite stubs the MLX models (no Apple-Silicon wheels needed).
 
 ### Quality gate
 
@@ -276,8 +249,7 @@ smoke start of the daemon) driven by the `code-discipline` skill. Its
 configuration lives in `.quality/` (`quality-gate.json` = commands,
 `quality-thresholds.json` = every numeric goal, `quality-dependencies.json` =
 the intended architecture). Tools are ordinary dev dependencies
-(`requirements-dev.txt`, `raycast/package.json`, plus `luacheck`/`luacov` from
-Homebrew + luarocks for the Hammerspoon side).
+(`requirements-dev.txt`, `raycast/package.json`).
 
 ```bash
 make quality        # fast pass over your local changes; read the "To fix" list
@@ -288,19 +260,16 @@ make quality-ship   # the ship report: every gate, must be green before handoff
 
 The engine publishes a versioned IPC **contract** (`voicebridge.py contract` /
 `GET /contract`) with a `schema_version`. Changes are **additive** within a
-version — a front-end reads the fields it knows and treats missing ones as
-absent, so `git pull` (which updates the engine and the Hammerspoon script
-together) and a not-yet-rebuilt Raycast bundle keep working. A
-backward-incompatible change bumps `schema_version`, and both front-ends warn
-when the engine's major version differs from the one they were built against.
+version — the front-end reads the fields it knows and treats missing ones as
+absent, so `git pull` (which updates the engine) and a not-yet-rebuilt Raycast
+bundle keep working. A backward-incompatible change bumps `schema_version`,
+and the front-end warns when the engine's major version differs from the one
+it was built against.
 
 ## Not yet
 
-- **Push-to-talk (hold) mode** — small; Hammerspoon-only (Raycast can't see
-  key-up). A top dictation-tool expectation.
 - **Audio pre-trim / VAD** — lower value now that the streaming transcriber
-  already cuts chunks at silences; worth it once streaming is in *both*
-  front-ends.
+  already cuts chunks at silences.
 - **Standalone `.app` packaging** — a real repackaging effort (everything
   currently assumes the repo layout + venv), not a quick step.
 

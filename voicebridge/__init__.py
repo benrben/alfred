@@ -1,8 +1,8 @@
 """
 Alfred — local speech-to-text + LLM cleanup for macOS (Apple Silicon).
 
-This is the *engine*. It is normally driven by the Hammerspoon front-end
-(voicebridge.lua), but every command also works standalone from a terminal via
+This is the *engine*. It is normally driven by the Raycast front-end
+(raycast/), but every command also works standalone from a terminal via
 the `voicebridge.py` entry-point shim.
 
 Pipeline:

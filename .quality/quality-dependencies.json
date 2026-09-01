@@ -2,7 +2,6 @@
   "_note": "Intended architecture (docs/hld.md): three independent components that talk over the engine's CLI/HTTP contract, never by import. Inside the Raycast extension, command views depend on lib, never the reverse. Command files are listed by name because the checker's '*' also matches '/', so 'raycast/src/*.tsx' would swallow lib/.",
   "modules": [
     { "name": "engine", "paths": ["voicebridge.py", "voicebridge/**"] },
-    { "name": "hammerspoon", "paths": ["voicebridge.lua", "voicebridge_lua/**"] },
     {
       "name": "raycast-commands",
       "paths": [
@@ -21,7 +20,6 @@
   ],
   "allow": {
     "engine": [],
-    "hammerspoon": [],
     "raycast-commands": ["raycast-lib"],
     "raycast-lib": [],
     "quality-tooling": []
