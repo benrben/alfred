@@ -138,12 +138,15 @@ export function buildRecordingMarkdown(args: {
  */
 export function formatHistoryTitle(text: string): string {
   const title = text.replace(/\s+/g, " ").trim();
-  return title.length > 60 ? title.slice(0, 57) + "…" : title || "(empty)";
+  const chars = Array.from(title);
+  return chars.length > 60
+    ? chars.slice(0, 57).join("") + "…"
+    : title || "(empty)";
 }
 
 /** A history record's ISO timestamp as a "YYYY-MM-DD HH:MM" label. */
 export function formatHistoryWhen(ts: string): string {
-  return (ts || "").replace("T", " ").slice(0, 16);
+  return typeof ts === "string" ? ts.replace("T", " ").slice(0, 16) : "";
 }
 
 // ---- ResultView.tsx: banner + markdown composition ------------------------

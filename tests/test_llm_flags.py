@@ -25,6 +25,10 @@ def cfg(**llm):
 
 
 class ReasoningEffortFlags(unittest.TestCase):
+    def test_invalid_backend_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "invalid .*backend"):
+            vb.candidate_backends(cfg(backend="bogus"))
+
     def test_defaults_are_low(self):
         c = vb.load_config(NO_CFG)
         self.assertEqual(c["llm"]["claude_effort"], "low")
@@ -70,6 +74,41 @@ class ReasoningEffortFlags(unittest.TestCase):
         finally:
             vb.run_llm_clean = orig
         self.assertNotIn("-c", captured["cmd"])
+
+    def test_zero_timeout_reaches_the_one_shot_path_unbounded(self):
+        """[llm] timeout = 0 is the documented "no limit" (big prompts): the
+        backend must receive None, never a substituted default."""
+        captured = {}
+        orig = vb.run_llm_clean
+        vb.run_llm_clean = (
+            lambda cmd, env, timeout: captured.setdefault("timeout", timeout) or "ok")
+        try:
+            vb.run_llm("codex", "hi", cfg(timeout=0))
+        finally:
+            vb.run_llm_clean = orig
+        self.assertIsNone(captured["timeout"])
+
+    def test_zero_timeout_reaches_the_warm_session_unbounded(self):
+        captured = {}
+
+        class FakeWarm:
+            def ask(self, prompt, timeout):
+                captured["timeout"] = timeout
+                return "ok"
+
+        orig = vb._get_warm
+        vb._get_warm = lambda c, env: FakeWarm()
+        try:
+            vb.run_llm("claude", "hi", cfg(timeout=0))
+        finally:
+            vb._get_warm = orig
+        self.assertIsNone(captured["timeout"])
+
+    def test_extra_args_must_be_an_array_of_strings(self):
+        with self.assertRaisesRegex(RuntimeError, "array of strings"):
+            vb._claude_warm_cmd(cfg(claude_extra_args="--foo"))
+        with self.assertRaisesRegex(RuntimeError, "array of strings"):
+            vb.run_llm("codex", "hi", cfg(codex_extra_args=[1]))
 
 
 class RefineFeedback(unittest.TestCase):

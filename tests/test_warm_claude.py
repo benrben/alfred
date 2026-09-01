@@ -102,6 +102,36 @@ class WarmClaudeLifecycle(unittest.TestCase):
         finally:
             w._stop()
 
+    def test_none_timeout_waits_without_a_deadline(self):
+        """[llm] timeout = 0 means "no limit" (run_llm passes timeout=None), so a
+        long job must block on the queue rather than hit an invented 120s
+        deadline. Regression for `timeout or 120`, which capped the warm path at
+        120s and killed the session mid-answer on a big prompt."""
+        w = self._warm(ECHO)
+        try:
+            w._start()                    # so the queue we instrument survives ask()
+            waits = []
+            real_get = w._q.get
+
+            def spy(block=True, timeout=None):
+                if block:                 # the pre-turn drain uses get_nowait
+                    waits.append(timeout)
+                return real_get(block=block, timeout=timeout)
+
+            w._q.get = spy
+            self.assertEqual(w.ask("hi", timeout=None), "ECHO:hi")
+            self.assertEqual(waits, [None])   # blocking wait, no substituted limit
+            self.assertTrue(w._alive())       # session survives, not "timed out"
+        finally:
+            w._stop()
+
+    def test_replaced_instance_cannot_restart_itself(self):
+        w = self._warm(ECHO)
+        w.stop()
+        with self.assertRaisesRegex(RuntimeError, "replaced"):
+            w.ask("late request", timeout=1)
+        self.assertFalse(w._alive())
+
 
 class ShouldPrewarmClaude(unittest.TestCase):
     """The daemon's startup pre-warm must never spawn/prompt `claude` for

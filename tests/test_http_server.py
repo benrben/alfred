@@ -40,6 +40,19 @@ def _free_port() -> int:
     return port
 
 
+class ContentLengthParsing(unittest.TestCase):
+    def test_rejects_malformed_and_negative_values(self):
+        for value in ("not-a-number", "-1", None):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError, "invalid Content-Length"
+            ):
+                vb._content_length({"Content-Length": value})
+
+    def test_accepts_missing_and_numeric_values(self):
+        self.assertEqual(vb._content_length({}), 0)
+        self.assertEqual(vb._content_length({"Content-Length": "12"}), 12)
+
+
 class ServeRoundTrip(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -123,8 +136,12 @@ class ServeRoundTrip(unittest.TestCase):
         status, obj = self._get("/contract")
         self.assertEqual(status, 200)
         self.assertEqual(obj["schema_version"], 1)
-        # GET /contract now emits the resolved contract (static keys + resolved).
-        self.assertEqual({k: obj[k] for k in vb.CONTRACT}, vb.CONTRACT)
+        # GET /contract now emits the resolved contract and the actual serving
+        # port, rather than the default port baked into the static contract.
+        expected = {**vb.CONTRACT,
+                    "daemon": {**vb.CONTRACT["daemon"], "port": self.port,
+                               "url": f"http://127.0.0.1:{self.port}/"}}
+        self.assertEqual(expected, {k: obj[k] for k in vb.CONTRACT})
         self.assertIn("resolved", obj)
 
     def test_post_argv_runs_command_and_returns_code_out_err(self):
@@ -132,8 +149,9 @@ class ServeRoundTrip(unittest.TestCase):
         self.assertEqual(status, 200)
         for k in ("code", "out", "err"):
             self.assertIn(k, obj)
-        self.assertEqual(obj["code"], 0)            # doctor returns 0
+        self.assertIn(obj["code"], (0, 1))          # missing deps are a hard check
         self.assertIn("Alfred doctor", obj["out"])  # its stdout is captured
+        self.assertEqual(obj["identity"]["app"], "alfred")
 
     def test_post_contract_command_round_trips_json(self):
         # `contract` prints the resolved contract; the daemon captures it.
@@ -163,6 +181,19 @@ class ServeRoundTrip(unittest.TestCase):
         c.close()
         self.assertEqual(r.status, 200)
         self.assertNotEqual(obj["code"], 0)
+        self.assertTrue(self._get("/")[1]["ok"])
+
+    def test_invalid_content_length_returns_json_error(self):
+        c = self._conn()
+        c.putrequest("POST", "/", skip_host=True, skip_accept_encoding=True)
+        c.putheader("Host", f"127.0.0.1:{self.port}")
+        c.putheader("Content-Length", "not-a-number")
+        c.endheaders()
+        r = c.getresponse()
+        obj = json.loads(r.read().decode())
+        c.close()
+        self.assertEqual(r.status, 400)
+        self.assertEqual(obj["error"], "invalid Content-Length")
         self.assertTrue(self._get("/")[1]["ok"])
 
     def test_cross_origin_post_is_refused(self):

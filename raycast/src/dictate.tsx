@@ -202,6 +202,17 @@ export default function Dictate(props: {
         stdio: ["ignore", "ignore", fd],
         env: engineEnv(),
       });
+      child.once("error", (error) => {
+        const current = stateRef.current;
+        if (!current || current.pid !== child.pid) return;
+        stateRef.current = null;
+        clearRecState();
+        removeIfPresent(wav);
+        removeIfPresent(meter);
+        refreshMenuBar();
+        setError(`Could not start the recorder: ${String(error)}`);
+        setPhase("error");
+      });
       child.unref();
       closeSync(fd);
       if (!child.pid) throw new Error("recorder did not start");
@@ -260,6 +271,9 @@ export default function Dictate(props: {
     const st = stateRef.current;
     if (!st) return;
     const fmt = currentFormat();
+    // Claim this recording synchronously before the first await/render. A
+    // double Enter or racing auto-stop then sees no state to finish twice.
+    stateRef.current = null;
     setPhase("transcribing");
     setProg(null);
     try {

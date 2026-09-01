@@ -8,7 +8,7 @@ import {
   showToast,
   useNavigation,
 } from "@raycast/api";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   backendFlags,
   callEngine,
@@ -49,33 +49,40 @@ function FeedbackForm({
 }) {
   const { pop } = useNavigation();
   const [busy, setBusy] = useState(false);
+  const submitting = useRef(false);
 
   async function submit(values: { instruction: string }) {
+    if (submitting.current) return;
     const instruction = (values.instruction || "").trim();
     if (!instruction) return;
+    submitting.current = true;
     setBusy(true);
-    const toast = await showToast({
-      style: Toast.Style.Animated,
-      title: "Refining…",
-    });
-    const res = await callEngine([
-      "text",
-      currentText,
-      "--instruction",
-      instruction,
-      ...backendFlags(),
-    ]);
-    const delivered = await resolveDelivery(res);
-    setBusy(false);
-    if (delivered.kind === "copied" || delivered.kind === "saved") {
-      toast.style = Toast.Style.Success;
-      toast.title = "Refined";
-      onRefined(delivered.text ?? currentText, instruction);
-      pop();
-    } else {
-      toast.style = Toast.Style.Failure;
-      toast.title = "Refine failed";
-      toast.message = lastErrorLine(res.err);
+    try {
+      const toast = await showToast({
+        style: Toast.Style.Animated,
+        title: "Refining…",
+      });
+      const res = await callEngine([
+        "text",
+        currentText,
+        "--instruction",
+        instruction,
+        ...backendFlags(),
+      ]);
+      const delivered = await resolveDelivery(res);
+      if (delivered.kind === "copied" || delivered.kind === "saved") {
+        toast.style = Toast.Style.Success;
+        toast.title = "Refined";
+        onRefined(delivered.text ?? currentText, instruction);
+        pop();
+      } else {
+        toast.style = Toast.Style.Failure;
+        toast.title = "Refine failed";
+        toast.message = lastErrorLine(res.err);
+      }
+    } finally {
+      submitting.current = false;
+      setBusy(false);
     }
   }
 
@@ -122,25 +129,32 @@ export function ResultView({
     initialBanner({ llmFailed, pasteFailed, path, note }),
   );
   const [busy, setBusy] = useState(false);
+  const reprocessing = useRef(false);
 
   async function reprocess(fmt: FormatChoice) {
+    if (reprocessing.current) return;
+    reprocessing.current = true;
     setBusy(true);
-    const toast = await showToast({
-      style: Toast.Style.Animated,
-      title: `Reprocessing — ${fmt.title}…`,
-    });
-    const res = await callEngine(["text", text, ...flagsForFormat(fmt)]);
-    const delivered = await resolveDelivery(res);
-    setBusy(false);
-    if (delivered.kind === "copied" || delivered.kind === "saved") {
-      setText(delivered.text ?? text);
-      setBanner(reprocessBanner(fmt));
-      toast.style = Toast.Style.Success;
-      toast.title = "Done";
-    } else {
-      toast.style = Toast.Style.Failure;
-      toast.title = "Reprocess failed";
-      toast.message = lastErrorLine(res.err);
+    try {
+      const toast = await showToast({
+        style: Toast.Style.Animated,
+        title: `Reprocessing — ${fmt.title}…`,
+      });
+      const res = await callEngine(["text", text, ...flagsForFormat(fmt)]);
+      const delivered = await resolveDelivery(res);
+      if (delivered.kind === "copied" || delivered.kind === "saved") {
+        setText(delivered.text ?? text);
+        setBanner(reprocessBanner(fmt));
+        toast.style = Toast.Style.Success;
+        toast.title = "Done";
+      } else {
+        toast.style = Toast.Style.Failure;
+        toast.title = "Reprocess failed";
+        toast.message = lastErrorLine(res.err);
+      }
+    } finally {
+      reprocessing.current = false;
+      setBusy(false);
     }
   }
 

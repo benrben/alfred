@@ -49,6 +49,10 @@ import threading
 import time
 from pathlib import Path
 
+_TRANSCRIBE_LOCK = threading.Lock()
+_CLIPBOARD_LOCK = threading.Lock()
+_CONFIG_WRITE_LOCK = threading.RLock()
+
 # Sentinel printed on stdout for the front-end to parse. The LAST line of
 # every command a front-end actually drives — EXCEPT --stdout, which prints
 # only the final text (for scripting/piping) and skips VB_STATUS entirely; a
@@ -179,7 +183,8 @@ CONTRACT: dict = {
         # `err` carries the request's captured stderr (error detail) so a
         # front-end can show WHAT failed. Added additively; older daemons omit it
         # and front-ends treat a missing err as "".
-        "response": {"code": "int", "out": "str", "err": "str"},
+        "response": {"code": "int", "out": "str", "err": "str",
+                      "identity": "daemon_identity"},
         "health": {"method": "GET", "path": "/"},
         # GET / responds with this identity so a front-end (and `serve` itself on
         # a busy port) can tell an Alfred daemon from a foreign server.
@@ -271,7 +276,7 @@ def _daemon_info_path() -> Path:
     return Path(CONTRACT["daemon"]["info_file"]).expanduser()
 
 
-def resolved_contract(cfg: dict | None = None) -> dict:
+def resolved_contract(cfg: dict | None = None, port: int | None = None) -> dict:
     """The CONTRACT with a `resolved` block of ABSOLUTE, config-aware paths.
 
     The static CONTRACT carries "~/..." templates and the DEFAULT history path;
@@ -287,7 +292,11 @@ def resolved_contract(cfg: dict | None = None) -> dict:
         "config": str(cfg.get("_loaded_from")) if cfg and cfg.get("_loaded_from")
         else "",
     }
-    return {**CONTRACT, "resolved": resolved}
+    daemon = dict(CONTRACT["daemon"])
+    if port is not None:
+        daemon["port"] = int(port)
+        daemon["url"] = daemon["url"].format(port=int(port))
+    return {**CONTRACT, "daemon": daemon, "resolved": resolved}
 
 
 def _deep_merge(base: dict, over: dict) -> dict:
@@ -435,7 +444,11 @@ def transcribe_samples(audio, cfg: dict, *, language: str | None,
     if decode_opts:
         kwargs.update(decode_opts)
 
-    result = mlx_whisper.transcribe(audio, **kwargs)
+    # mlx-whisper caches a shared model and is not re-entrant. Streaming
+    # sessions may overlap briefly with a newly-started capture, so serialize
+    # every model invocation rather than only the batch path.
+    with _TRANSCRIBE_LOCK:
+        result = mlx_whisper.transcribe(audio, **kwargs)
     if timestamps:
         text = _format_segments(result.get("segments"))
         # Fall back to plain text if segments came back empty/malformed.
@@ -820,6 +833,11 @@ def candidate_backends(cfg: dict) -> list[str]:
     We deliberately do NOT fall back from 'local' to a network CLI: strict-local
     must never silently make a cloud call."""
     want = cfg["llm"]["backend"]
+    if want not in {"local", "auto", "claude", "codex"}:
+        raise RuntimeError(
+            f"invalid [llm] backend '{want}'; choose one of: "
+            "local, auto, claude, codex"
+        )
     if want == "local":
         return ["local"]
     have = detect_backends()
@@ -919,8 +937,16 @@ def _claude_warm_cmd(cfg: dict) -> list[str]:
         cmd += ["--effort", cfg["llm"]["claude_effort"]]
     if cfg["llm"].get("fast", True):
         cmd += ["--strict-mcp-config", "--setting-sources", ""]
-    cmd += list(cfg["llm"].get("claude_extra_args") or [])
+    cmd += _extra_args(cfg, "claude_extra_args")
     return cmd
+
+
+def _extra_args(cfg: dict, key: str) -> list[str]:
+    """Return a validated argv list for a configured backend."""
+    value = cfg["llm"].get(key) or []
+    if not isinstance(value, list) or not all(isinstance(arg, str) for arg in value):
+        raise RuntimeError(f"[llm] {key} must be an array of strings")
+    return value
 
 
 class WarmClaude:
@@ -937,6 +963,7 @@ class WarmClaude:
         self._turns = 0
         self._last = 0.0
         self._lock = threading.Lock()
+        self._retired = False
 
     def _alive(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
@@ -950,6 +977,12 @@ class WarmClaude:
                 step()
             except Exception:                       # noqa: BLE001
                 pass
+
+    def stop(self) -> None:
+        """Stop this instance without racing an in-flight ask()."""
+        with self._lock:
+            self._retired = True
+            self._stop()
 
     def _start(self) -> None:
         self._stop()
@@ -984,6 +1017,8 @@ class WarmClaude:
 
     def ask(self, prompt: str, timeout: float | None) -> str:
         with self._lock:
+            if self._retired:
+                raise RuntimeError("warm claude session was replaced")
             stale = (self._last and time.monotonic() - self._last > self.idle_secs)
             if not self._alive() or self._turns >= self.max_turns or stale:
                 self._start()
@@ -1001,12 +1036,17 @@ class WarmClaude:
             except Exception as e:                  # noqa: BLE001
                 self._stop()
                 raise RuntimeError(f"warm claude write failed: {e}")
-            deadline = time.monotonic() + (timeout or 120)
+            # timeout=None is the caller's "no limit" ([llm] timeout = 0, for big
+            # prompts): wait on the queue with no deadline rather than inventing
+            # a 120s one, so the warm path matches the one-shot path.
+            deadline = None if timeout is None else time.monotonic() + timeout
             while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    self._stop()
-                    raise RuntimeError("warm claude timed out")
+                remaining = None
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        self._stop()
+                        raise RuntimeError("warm claude timed out")
                 try:
                     line = self._q.get(timeout=remaining)
                 except queue.Empty:
@@ -1052,7 +1092,7 @@ def _get_warm(cfg: dict, env: dict) -> WarmClaude | None:
     with _WARM_LOCK:
         if _WARM is None or _WARM_SIG != sig:
             if _WARM is not None:
-                _WARM._stop()
+                _WARM.stop()
             _WARM = WarmClaude(cmd, env, sig[1], sig[2])
             _WARM_SIG = sig
         return _WARM
@@ -1085,7 +1125,7 @@ def run_llm(backend: str, prompt: str, cfg: dict) -> str:
             # Skip the user's MCP servers, plugins, hooks, CLAUDE.md and settings:
             # pure startup overhead for a one-shot text transform.
             cmd += ["--strict-mcp-config", "--setting-sources", ""]
-        cmd += list(cfg["llm"].get("claude_extra_args") or [])
+        cmd += _extra_args(cfg, "claude_extra_args")
         return run_llm_clean(cmd, env, timeout)
     if backend == "codex":
         cmd = [find_tool("codex") or "codex", "exec", "--skip-git-repo-check",
@@ -1097,7 +1137,7 @@ def run_llm(backend: str, prompt: str, cfg: dict) -> str:
             cmd += ["-c", f"model_reasoning_effort={cfg['llm']['codex_reasoning_effort']}"]
         if cfg["llm"].get("codex_model"):
             cmd += ["-m", cfg["llm"]["codex_model"]]
-        cmd += list(cfg["llm"].get("codex_extra_args") or [])
+        cmd += _extra_args(cfg, "codex_extra_args")
         cmd += [prompt]
         # Strip API-key + routing vars so codex uses the ChatGPT login, not the API.
         env = _clean_env(_CODEX_KEY_VARS)
@@ -1621,7 +1661,8 @@ def _save_path(cfg: dict) -> str:
 # Thin wrappers kept for the existing call sites (e.g. history re-copy) — they
 # delegate to the shared default sink, so behaviour is unchanged.
 def copy_clipboard(text: str) -> None:
-    _SINK.copy(text)
+    with _CLIPBOARD_LOCK:
+        _SINK.copy(text)
 
 
 def auto_paste() -> None:
@@ -1649,25 +1690,22 @@ def deliver(text: str, cfg: dict, do_paste: bool,
     threshold = int(cfg["output"]["size_threshold"])
     if threshold > 0 and len(text) > threshold:      # 0 = never save, always copy
         return "saved", sink.write_file(text, _save_path(cfg)), None
-    if not do_paste:
+    # A plain copy can overwrite another request between its copy and paste, so
+    # all clipboard mutations share the same lock, not only paste-mode calls.
+    with _CLIPBOARD_LOCK:
+        if not do_paste:
+            sink.copy(text)
+            return "copied", None, None
+        restore = bool(cfg["output"].get("restore_clipboard", False))
+        prior = sink.snapshot() if restore else None
         sink.copy(text)
-        return "copied", None, None
-    restore = bool(cfg["output"].get("restore_clipboard", False))
-    prior = sink.snapshot() if restore else None
-    sink.copy(text)
-    paste_ok = sink.paste() is not False             # None (fake) -> treated ok
-    if restore and paste_ok:
-        try:
-            sink.restore(prior)
-        except Exception as e:                        # noqa: BLE001
-            # Best-effort: putting the user's PRIOR clipboard back is a
-            # secondary nicety, not the delivery itself. The real work (copy +
-            # paste) already succeeded above; a restore failure must never
-            # retroactively turn that success into a reported error — the same
-            # class of bug the history_append guard in _deliver_and_report
-            # exists to prevent, one call away from this one.
-            sys.stderr.write(f"warning: clipboard restore failed: {e}\n")
-    return "copied", None, paste_ok
+        paste_ok = sink.paste() is not False         # None (fake) -> treated ok
+        if restore and paste_ok:
+            try:
+                sink.restore(prior)
+            except Exception as e:                    # noqa: BLE001
+                sys.stderr.write(f"warning: clipboard restore failed: {e}\n")
+        return "copied", None, paste_ok
 
 
 # ----------------------------------------------------------------------------
@@ -2073,7 +2111,12 @@ def cmd_history(args) -> int:
         if not line.strip():
             continue
         try:
-            recs.append(json.loads(line))
+            rec = json.loads(line)
+            if (isinstance(rec, dict) and isinstance(rec.get("ts"), str)
+                    and isinstance(rec.get("source"), str)
+                    and type(rec.get("chars")) is int
+                    and isinstance(rec.get("text"), str)):
+                recs.append(rec)
         except (json.JSONDecodeError, ValueError):
             continue                                 # skip a corrupt line, keep going
     if args.copy is not None:
@@ -2086,8 +2129,9 @@ def cmd_history(args) -> int:
         copy_clipboard(rec["text"])
         print(f"copied item {idx} ({rec['chars']} chars) to clipboard")
         return 0
-    n = args.limit or 10
-    for i, rec in enumerate(reversed(recs[-n:])):
+    n = args.limit if args.limit is not None else 10
+    selected = recs[-n:] if n > 0 else []
+    for i, rec in enumerate(reversed(selected)):
         preview = rec["text"].replace("\n", " ")
         if len(preview) > 70:
             preview = preview[:67] + "..."
@@ -2154,28 +2198,28 @@ def cmd_set_intent(args) -> int:
         sys.stderr.write("error: intent key must be letters/numbers/-/_.\n")
         return 2
     path = _config_target(args)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = path.read_text(encoding="utf-8") if path.is_file() else ""
-    # Back up the PRISTINE file BEFORE mutating, so a restore recovers the old prompt.
-    if path.is_file():
-        try:
-            path.with_suffix(path.suffix + ".bak").write_text(text, encoding="utf-8")
-        except OSError:
-            pass
-    doc = tomlkit.parse(text)
-    if "intent" not in doc:
-        doc["intent"] = tomlkit.table(is_super_table=True)
-    intent = doc["intent"]
-    sub = intent.get(key)
-    if not isinstance(sub, tomlkit.items.Table):
-        sub = tomlkit.table()
-    sub["prompt"] = args.prompt or ""
-    if args.label:
-        sub["label"] = args.label
-    if args.description:
-        sub["description"] = args.description
-    intent[key] = sub
-    path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+    with _CONFIG_WRITE_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = path.read_text(encoding="utf-8") if path.is_file() else ""
+        if path.is_file():
+            try:
+                path.with_suffix(path.suffix + ".bak").write_text(text, encoding="utf-8")
+            except OSError:
+                pass
+        doc = tomlkit.parse(text)
+        if "intent" not in doc:
+            doc["intent"] = tomlkit.table(is_super_table=True)
+        intent = doc["intent"]
+        sub = intent.get(key)
+        if not isinstance(sub, tomlkit.items.Table):
+            sub = tomlkit.table()
+        sub["prompt"] = args.prompt or ""
+        if args.label:
+            sub["label"] = args.label
+        if args.description:
+            sub["description"] = args.description
+        intent[key] = sub
+        path.write_text(tomlkit.dumps(doc), encoding="utf-8")
     ok = any(m["key"] == key for m in mode_catalog(load_config(str(path))))
     print_status("saved" if ok else "error")
     return 0 if ok else 1
@@ -2188,21 +2232,21 @@ def _set_config_kv(path: Path, section: str, key: str, value_toml: str) -> None:
     value_toml is a TOML-encoded value (e.g. '"email"', 'true'); we round-trip
     the document with tomlkit so existing comments and formatting are preserved."""
     import tomlkit
-    text = path.read_text(encoding="utf-8") if path.is_file() else ""
-    doc = tomlkit.parse(text)
-    # Parse the encoded value back to a typed tomlkit value (string, bool, ...).
-    value = tomlkit.parse(f"_ = {value_toml}")["_"]
-    table = doc.get(section)
-    if table is None:
-        table = tomlkit.table()
-        doc[section] = table
-    table[key] = value
-    if path.is_file():
-        try:
-            path.with_suffix(path.suffix + ".bak").write_text(text, encoding="utf-8")
-        except OSError:
-            pass
-    path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+    with _CONFIG_WRITE_LOCK:
+        text = path.read_text(encoding="utf-8") if path.is_file() else ""
+        doc = tomlkit.parse(text)
+        value = tomlkit.parse(f"_ = {value_toml}")["_"]
+        table = doc.get(section)
+        if table is None:
+            table = tomlkit.table()
+            doc[section] = table
+        table[key] = value
+        if path.is_file():
+            try:
+                path.with_suffix(path.suffix + ".bak").write_text(text, encoding="utf-8")
+            except OSError:
+                pass
+        path.write_text(tomlkit.dumps(doc), encoding="utf-8")
 
 
 def cmd_set_model(args) -> int:
@@ -2380,11 +2424,12 @@ def cmd_doctor(args) -> int:
     print(f"backend: {cfg['llm']['backend']}   output: {cfg['output']['mode']}   "
           f"save_dir: {cfg['output']['save_dir']}")
     sd = Path(cfg["output"]["save_dir"]).expanduser()
-    try:
-        sd.mkdir(parents=True, exist_ok=True)
+    if sd.is_dir() and os.access(sd, os.W_OK):
         print(f"{ok}save_dir writable: {sd}")
-    except Exception as e:                          # noqa: BLE001
-        print(f"{bad}save_dir not writable: {sd} ({e})")
+    elif sd.exists():
+        print(f"{bad}save_dir not writable: {sd}")
+    else:
+        print(f"{warn}save_dir not present: {sd} (created on first save)")
 
     # macOS permissions (TCC) — a STATIC note, not a live probe. Actively
     # querying Accessibility (osascript "System Events" UI-elements-enabled) hangs
@@ -2409,7 +2454,16 @@ def cmd_doctor(args) -> int:
         print(f"{bad}port {CONTRACT['daemon']['port']} held by a NON-Alfred server")
     else:
         print(f"{warn}warm daemon: not running (starts on first capture)")
-    return 0
+    hard_failures = (["config"] if cfg.get("_config_error") else [])
+    hard_failures += [mod for mod in ("mlx_whisper", "soundfile", "numpy")
+                     if not _installed(mod)]
+    if shutil.which("sox") is None:
+        hard_failures.append("sox")
+    if platform.system() == "Darwin" and shutil.which("pbcopy") is None:
+        hard_failures.append("pbcopy")
+    if sd.exists() and not (sd.is_dir() and os.access(sd, os.W_OK)):
+        hard_failures.append("save_dir")
+    return 1 if hard_failures else 0
 
 
 # ----------------------------------------------------------------------------
@@ -2538,6 +2592,17 @@ def _loopback_host(headers) -> bool:
     return hostname in ("127.0.0.1", "localhost", "::1")
 
 
+def _content_length(headers) -> int:
+    """Parse a non-negative request Content-Length or raise ValueError."""
+    try:
+        length = int(headers.get("Content-Length", 0))
+    except (TypeError, ValueError) as error:
+        raise ValueError("invalid Content-Length") from error
+    if length < 0:
+        raise ValueError("invalid Content-Length")
+    return length
+
+
 def cmd_serve(args) -> int:
     """Warm background engine: load the Whisper model once and serve requests
     over localhost HTTP, so each dictation skips the multi-second model load.
@@ -2562,7 +2627,7 @@ def cmd_serve(args) -> int:
         cfg0 = load_config(args.config)
         sys.stderr.write("alfred: warming Whisper model…\n")
         sys.stderr.flush()
-        with contextlib.redirect_stdout(sys.stderr):
+        with _TRANSCRIBE_LOCK, contextlib.redirect_stdout(sys.stderr):
             mlx_whisper.transcribe(np.zeros(16000, dtype="float32"),
                                    path_or_hf_repo=cfg0["stt"]["model"], verbose=False)
         sys.stderr.write("alfred: model ready.\n")
@@ -2608,7 +2673,7 @@ def cmd_serve(args) -> int:
                 return
             if self.path == "/contract":               # the IPC contract
                 self._json(200, resolved_contract(
-                    load_config(getattr(args, "config", None))))
+                    load_config(getattr(args, "config", None)), int(args.port)))
             else:                                       # health + identity
                 self._json(200, _daemon_identity())
 
@@ -2622,7 +2687,11 @@ def cmd_serve(args) -> int:
             if self.headers.get("Origin"):
                 self._json(403, {"error": "cross-origin POST refused"})
                 return
-            n = int(self.headers.get("Content-Length", 0))
+            try:
+                n = _content_length(self.headers)
+            except ValueError:
+                self._json(400, {"error": "invalid Content-Length"})
+                return
             try:
                 req = json.loads(self.rfile.read(n) or b"{}")
             except Exception:                          # noqa: BLE001
@@ -2659,7 +2728,7 @@ def cmd_serve(args) -> int:
             if err_text:                               # keep it in the daemon log too
                 _real_err.write(err_text)
             self._json(200, {"code": code, "out": out_buf.getvalue(),
-                             "err": err_text})
+                             "err": err_text, "identity": _daemon_identity()})
 
         def log_message(self, *a):
             pass

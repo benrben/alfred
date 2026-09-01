@@ -48,8 +48,9 @@ elif command -v brew >/dev/null 2>&1; then
   echo "Installing sox (recorder) via Homebrew ..."
   brew install sox
 else
-  echo "sox is not installed and Homebrew was not found."
-  echo "Install Homebrew (https://brew.sh), then run: brew install sox"
+  echo "ERROR: sox is not installed and Homebrew was not found." >&2
+  echo "       Install Homebrew (https://brew.sh), then run: brew install sox" >&2
+  exit 1
 fi
 
 # --- 5. Hammerspoon (hotkeys) + config wiring ------------------------------
@@ -59,15 +60,16 @@ elif command -v brew >/dev/null 2>&1; then
   echo "Installing Hammerspoon (global hotkeys + menu bar) via Homebrew ..."
   brew install --cask hammerspoon
 else
-  echo "Hammerspoon is not installed and Homebrew was not found."
-  echo "Install Homebrew (https://brew.sh), then run: brew install --cask hammerspoon"
+  echo "ERROR: Hammerspoon is not installed and Homebrew was not found." >&2
+  echo "       Install Homebrew (https://brew.sh), then run: brew install --cask hammerspoon" >&2
+  exit 1
 fi
 
 # Load the Alfred front-end from Hammerspoon's config (idempotent).
 HS_INIT="$HOME/.hammerspoon/init.lua"
 LOAD_LINE="dofile(\"$DIR/voicebridge.lua\")  -- Alfred"
 mkdir -p "$(dirname "$HS_INIT")"
-if [[ -f "$HS_INIT" ]] && grep -qF "voicebridge.lua" "$HS_INIT"; then
+if [[ -f "$HS_INIT" ]] && grep -qFx "$LOAD_LINE" "$HS_INIT"; then
   echo "Hammerspoon config already loads Alfred: $HS_INIT"
 else
   printf '%s\n' "$LOAD_LINE" >> "$HS_INIT"
@@ -88,7 +90,7 @@ fi
 echo
 echo "Running environment check ..."
 echo
-./.venv/bin/python voicebridge.py doctor || true
+./.venv/bin/python voicebridge.py doctor
 
 cat <<EOF
 

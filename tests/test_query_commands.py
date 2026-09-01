@@ -21,6 +21,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -140,6 +141,12 @@ class HistoryLedger(unittest.TestCase):
         self.assertIn("third item", lines[0])
         self.assertIn("first item", lines[2])
 
+    def test_limit_zero_lists_no_records(self):
+        rc, out = _run(vb.cmd_history,
+                       _ns(config=self._config_pointing_here(), limit=0, copy=None))
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+
     def test_copy_index_0_copies_most_recent(self):
         rc, out = _run(vb.cmd_history,
                        _ns(config=self._config_pointing_here(), limit=10, copy=0))
@@ -159,16 +166,50 @@ class HistoryLedger(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertEqual(self.copied, [])
 
+    def test_history_skips_structurally_invalid_records(self):
+        cfg = self._config_pointing_here()
+        path = vb.history_path(vb.load_config(cfg))
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write('{}\n')
+            fh.write('{"ts": "now", "source": "text", "chars": "3", '
+                     '"text": "bad chars"}\n')
+        rc, out = _run(vb.cmd_history,
+                       _ns(config=cfg, limit=10, copy=None))
+        self.assertEqual(rc, 0)
+        self.assertNotIn("bad chars", out)
+
 
 class DoctorStatus(unittest.TestCase):
     def test_doctor_returns_0_and_mentions_deps(self):
         rc, out = _run(vb.cmd_doctor, _ns())
-        self.assertEqual(rc, 0)
+        self.assertIn(rc, (0, 1))
         self.assertIn("Alfred doctor", out)
         # Mentions the key dependencies / backends it checks.
         for needle in ("mlx_whisper", "Python", "LLM backend", "STT model"):
             self.assertIn(needle, out)
 
+    def test_doctor_does_not_create_missing_save_dir(self):
+        root = Path(tempfile.mkdtemp())
+        missing = root / "not-created"
+        cfg = root / "config.toml"
+        cfg.write_text(f'[output]\nsave_dir = "{missing}"\n', encoding="utf-8")
+        with mock.patch("importlib.util.find_spec", return_value=object()), \
+             mock.patch.object(vb.shutil, "which", return_value="/bin/tool"), \
+             mock.patch.object(vb, "_probe_daemon", return_value=None):
+            rc, out = _run(vb.cmd_doctor, _ns(config=str(cfg)))
+        self.assertEqual(rc, 0)
+        self.assertFalse(missing.exists())
+        self.assertIn("save_dir not present", out)
+
+    def test_doctor_fails_when_required_dependency_is_missing(self):
+        with mock.patch(
+            "importlib.util.find_spec",
+            side_effect=lambda name: None if name == "mlx_whisper" else object(),
+        ), mock.patch.object(vb.shutil, "which", return_value="/bin/tool"), \
+             mock.patch.object(vb, "_probe_daemon", return_value=None):
+            rc, out = _run(vb.cmd_doctor, _ns())
+        self.assertEqual(rc, 1)
+        self.assertIn("XX python module: mlx_whisper", out)
 
 if __name__ == "__main__":
     unittest.main()

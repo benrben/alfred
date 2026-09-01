@@ -172,19 +172,18 @@ local refreshSettings, setModel
 -- ---- Small helpers -------------------------------------------------------
 
 function fmtTime(secs)
+  secs = math.max(0, tonumber(secs) or 0)
   return string.format("%02d:%02d", math.floor(secs / 60), secs % 60)
 end
 
 -- Ensure the owner-only ~/.voicebridge dir exists before we write into it (the
 -- engine creates it 0700 too; we chmod best-effort in case we win the race).
-local vbDirReady = false
 local function ensureVBDir()
-  if vbDirReady then return end
   if not hs.fs.attributes(VB_DIR) then
     hs.fs.mkdir(VB_DIR)
-    pcall(function() hs.fs.chmod(VB_DIR, 448) end)   -- 0700; no-op if unsupported
   end
-  vbDirReady = true
+  -- Tighten an existing directory too (restores/older installs may be 0755).
+  pcall(function() hs.fs.chmod(VB_DIR, 448) end)     -- 0700; no-op if unsupported
 end
 
 -- Off by default: the trace can contain dictation excerpts. Set true to write a
@@ -216,9 +215,11 @@ function notify(title, text, onClick)
   n:send()
 end
 
+local wavSeq = 0
 function tmpWav()
   local tmp = os.getenv("TMPDIR") or "/tmp/"
-  return tmp .. "voicebridge_" .. os.time() .. ".wav"
+  wavSeq = wavSeq + 1
+  return tmp .. "voicebridge_" .. os.time() .. "_" .. wavSeq .. ".wav"
 end
 
 -- Paste `text` into the frontmost app: put it on the clipboard, then (after a
@@ -345,6 +346,26 @@ local STATUS_SEP      = "\t"
 local RESULT_SENTINEL = "VB_RESULT"
 local LLM_FAILED      = "llm_failed"
 local PASTE_FAILED    = "paste_failed"
+local DAEMON_SCHEMA_VERSION = 1
+
+-- The health response is an identity handshake, not merely an HTTP status.
+-- A different localhost service must never receive dictated text or argv.
+local function isAlfredIdentity(identity)
+  return type(identity) == "table"
+    and identity.ok == true
+    and identity.app == "alfred"
+    and identity.schema_version == DAEMON_SCHEMA_VERSION
+    and type(identity.pid) == "number"
+    and identity.pid > 0 and identity.pid % 1 == 0
+end
+
+local function daemonPidFromInfo(content, decode)
+  local ok, info = pcall(decode, content or "")
+  if ok and isAlfredIdentity(info) and type(info.port) == "number" then
+    return math.floor(info.pid)
+  end
+  return nil
+end
 
 -- Parse the engine's machine-readable status line into its tab-separated parts:
 -- "VB_STATUS\tkind[\textra...]" -> { kind, extra... }; nil when none is present.
@@ -519,13 +540,31 @@ function startDaemon()
 end
 
 function ensureDaemon()
-  hs.http.asyncGet(DAEMON_URL, nil, function(status)
-    if status ~= 200 then startDaemon() end
+  hs.http.asyncGet(DAEMON_URL, nil, function(status, body)
+    local ok, identity = pcall(hs.json.decode, body or "")
+    if status == -1004 then
+      startDaemon()
+    elseif status == 200 and ok and isAlfredIdentity(identity) then
+      return
+    elseif status == 200 then
+      dbg("ensureDaemon: port is occupied by a non-Alfred service")
+      notify("Alfred", "Port " .. DAEMON_PORT .. " is not an Alfred engine.")
+    end
   end)
 end
 
 function restartDaemon()
-  hs.execute("pkill -f 'voicebridge.py serve' 2>/dev/null")
+  local resolved = VB.contract and type(VB.contract.resolved) == "table"
+                   and VB.contract.resolved.daemon_info
+  local f = io.open(resolved or (VB_DIR .. "/daemon.json"), "r")
+  local content = f and f:read("*a") or ""
+  if f then f:close() end
+  local pid = daemonPidFromInfo(content, hs.json.decode)
+  if pid then
+    hs.execute("/bin/kill -TERM " .. tostring(pid) .. " 2>/dev/null")
+  else
+    dbg("restartDaemon: no recorded Alfred daemon PID")
+  end
   hs.alert.show("Restarting Alfred engine…", 1)
   hs.timer.doAfter(0.6, startDaemon)
 end
@@ -570,7 +609,11 @@ local function classifyPost(status, hasBody)
 end
 
 -- `argv` starts at the subcommand (e.g. {"process", wav}); no python/script.
-function runEngine(argv)
+function runEngine(argv, recordingFinished)
+  if VB.state == "recording" or (VB.state == "processing" and not recordingFinished) then
+    hs.alert.show("Busy…", 0.8)
+    return false
+  end
   setState("processing")
   local cmd = buildEngineArgv(argv, VB.captureFlags, VB.backend)
   VB.captureFlags = nil
@@ -581,9 +624,10 @@ function runEngine(argv)
   -- Prefer the warm daemon; fall back to a one-shot process ONLY when it is DOWN
   -- (see classifyPost): a >60s job would otherwise time the POST out at ~60s and
   -- get re-run, double-writing history/clipboard.
-  hs.http.asyncPost(DAEMON_URL, hs.json.encode({ argv = cmd }),
-    { ["Content-Type"] = "application/json" },
-    function(status, body)
+  local function postToDaemon()
+    hs.http.asyncPost(DAEMON_URL, hs.json.encode({ argv = cmd }),
+      { ["Content-Type"] = "application/json" },
+      function(status, body)
       if myRun ~= VB.runId then
         dbg("runEngine[" .. myRun .. "]: stale result (cur=" .. tostring(VB.runId) .. ") — dropped")
         return
@@ -591,15 +635,16 @@ function runEngine(argv)
       local outcome = classifyPost(status, body ~= nil and #body > 0)
       if outcome == "ok" then
         local ok, resp = pcall(hs.json.decode, body)
-        if ok and type(resp) == "table" then
+        if ok and type(resp) == "table" and isAlfredIdentity(resp.identity) then
           dbg("daemon result code=" .. tostring(resp.code))
           onResult(resp.code or 0, resp.out or "", resp.err or "")   -- thread err
           return
         end
-        -- 200 but unreadable: don't re-run (the engine may have done the work).
+        -- 200 but unreadable/foreign: don't re-run (the engine may have done
+        -- the work, and replaying argv could duplicate delivery).
         cancelWatchdog(); setState("idle")
-        dbg("daemon 200 but undecodable body")
-        notify("Alfred", "The engine returned an unreadable response.")
+        dbg("daemon 200 but response identity was invalid")
+        notify("Alfred", "The response was not from the Alfred engine.")
       elseif outcome == "down" then
         dbg("daemon down (status=" .. tostring(status) .. ") -> one-shot")
         runEngineOneShot(cmd)   -- watchdog stays armed to bound the one-shot
@@ -608,7 +653,24 @@ function runEngine(argv)
         dbg("daemon busy (status=" .. tostring(status) .. ") -> keep processing, no re-run")
         notify("Alfred", "Still transcribing… the engine is taking a while.")
       end
-    end)
+      end)
+  end
+  -- Validate the listening service before sending argv/text. A foreign service
+  -- returning HTTP 200 must not receive the dictated payload.
+  hs.http.asyncGet(DAEMON_URL, nil, function(status, body)
+    if myRun ~= VB.runId then return end
+    local ok, identity = pcall(hs.json.decode, body or "")
+    if status == 200 and ok and isAlfredIdentity(identity) then
+      postToDaemon()
+    elseif status == -1004 then
+      runEngineOneShot(cmd)
+      ensureDaemon()
+    else
+      cancelWatchdog(); setState("idle")
+      notify("Alfred", "The configured daemon is not an Alfred engine.")
+    end
+  end)
+  return true
 end
 
 -- The result panel's button actions, injected into showResult so the panel
@@ -627,6 +689,7 @@ function resultPanelHandlers()
       pasteText(text)
     end,
     onEmail = function(text)
+      if VB.state ~= "idle" then hs.alert.show("Busy…", 0.8); return end
       closeResult()
       VB.captureFlags = { "--mode", "email" }
       runEngine({ "text", text })
@@ -675,6 +738,7 @@ end
 -- the literal fallbacks where a field is missing (older engine). Touches only
 -- primitives already defaulted above, so a partial contract degrades gracefully.
 local function applyContract(c)
+  if type(c.schema_version) == "number" then DAEMON_SCHEMA_VERSION = c.schema_version end
   local sl = type(c.status_line) == "table" and c.status_line or {}
   if type(sl.sentinel) == "string" then STATUS_SENTINEL = sl.sentinel end
   if type(sl.sep) == "string" then STATUS_SEP = sl.sep end
@@ -713,6 +777,21 @@ end
 function onRecDone()
   destroyHUD()
   dbg("onRecDone state=" .. tostring(VB.state) .. " wav=" .. tostring(VB.wav))
+  VB.recTask = nil
+  if VB.cancelRecording then
+    VB.cancelRecording = nil
+    if VB.wav then os.remove(VB.wav) end
+    VB.wav = nil
+    VB.captureFlags = nil
+    setState("idle")
+    return
+  end
+  -- Sox ended by itself at MAX_RECORD_SECS. Treat that as a normal completed
+  -- recording instead of discarding the finalized WAV in a stuck UI state.
+  if VB.state == "recording" then
+    setState("processing")
+    notify("Alfred", "Maximum recording length reached — transcribing now.")
+  end
   -- sox exited (after we sent SIGINT). Process if the file has audio.
   if VB.state ~= "processing" then return end
   local f = io.open(VB.wav, "r")
@@ -720,7 +799,7 @@ function onRecDone()
   if f then size = f:seek("end"); f:close() end
   dbg("onRecDone size=" .. tostring(size))
   if size and size > 1024 then
-    runEngine({ "process", VB.wav })
+    runEngine({ "process", VB.wav }, true)
   else
     setState("idle")
     notify("Alfred", "Nothing recorded.")
@@ -794,12 +873,15 @@ end
 
 -- Show the format list; calls onPick(flags) with the chosen entry's flags.
 function pickMode(onPick)
+  if VB.chooser then hs.alert.show("Chooser already open…", 0.8); return end
   local chooser
   chooser = hs.chooser.new(function(choice)
+    VB.chooser = nil
     chooser = nil
     if not choice then return end     -- cancelled: do nothing
     onPick(choice.flags or {})
   end)
+  VB.chooser = chooser
   chooser:placeholderText("Choose output format…")
   chooser:searchSubText(true)
   chooser:rows(#MODES)
@@ -811,6 +893,7 @@ end
 function dictateWithMode()
   if VB.state ~= "idle" then hs.alert.show("Busy…", 0.8); return end
   pickMode(function(flags)
+    if VB.state ~= "idle" then hs.alert.show("Busy…", 0.8); return end
     VB.captureFlags = flags
     startRecording()
   end)
@@ -821,16 +904,20 @@ end
 -- rows stay visible while you type your message.
 function typePrompt()
   if VB.state ~= "idle" then hs.alert.show("Busy…", 0.8); return end
+  if VB.chooser then hs.alert.show("Chooser already open…", 0.8); return end
   local chooser
   chooser = hs.chooser.new(function(choice)
     local q = (chooser and chooser:query()) or ""
+    VB.chooser = nil
     chooser = nil
     if not choice then return end
+    if VB.state ~= "idle" then hs.alert.show("Busy…", 0.8); return end
     local text = q:gsub("^%s*(.-)%s*$", "%1")
     if #text == 0 then hs.alert.show("Type some text first", 1.0); return end
     VB.captureFlags = choice.flags or {}
     runEngine({ "text", text })
   end)
+  VB.chooser = chooser
   chooser:placeholderText("Type text, then pick a format ↵")
   chooser:queryChangedCallback(function() end)   -- disables row filtering
   chooser:choices(MODES)
@@ -1037,6 +1124,7 @@ function onWebMessage(message)
     VB.winTranslate = normalizeTranslate(d.value)
   elseif a == "processText" then
     if type(d.text) == "string" and #d.text > 0 then
+      if VB.state ~= "idle" then hs.alert.show("Busy…", 0.8); return end
       VB.captureFlags = windowCaptureFlags()
       runEngine({ "text", d.text })
     end
@@ -1253,7 +1341,11 @@ function openWindow()
     state = VB.state,
     settings = VB.settings or {},
   }
-  w:html(WIN_HEAD .. hs.json.encode(init) .. WIN_TAIL)
+  -- A literal </script> inside dictated/history text would end the enclosing
+  -- script element even though it is JSON-quoted. Escape every '<' in the
+  -- serialized payload; JavaScript decodes \u003c back to the original text.
+  local initJson = hs.json.encode(init):gsub("<", "\\u003c")
+  w:html(WIN_HEAD .. initJson .. WIN_TAIL)
   w:show():bringToFront()
 end
 
@@ -1356,7 +1448,9 @@ if os.getenv("VB_LUA_TEST") then
            errorMessage = errorMessage, resultBanner = resultBanner,
            classifyPost = classifyPost, buildEngineArgv = buildEngineArgv,
            -- daemon-launch pure logic
-           buildStartDaemonCmd = buildStartDaemonCmd }
+           buildStartDaemonCmd = buildStartDaemonCmd,
+           isAlfredIdentity = isAlfredIdentity,
+           daemonPidFromInfo = daemonPidFromInfo }
 end
 
 -- ---- Consume the engine contract (one fetch, cached) ---------------------
@@ -1386,8 +1480,16 @@ VB.menubar:setMenu(function()
     typePrompt = typePrompt,
     setBackend = function(v) VB.backend = v end,
     cancel = function()
-      if VB.recTask and VB.recTask:isRunning() then VB.recTask:terminate() end
-      if VB.state == "processing" then
+      if VB.state == "recording" and VB.recTask and VB.recTask:isRunning() then
+        -- Keep the UI non-idle until Sox's completion callback confirms the
+        -- process has exited. onRecDone removes this cancelled WAV and resets.
+        VB.cancelRecording = true
+        setState("processing")
+        destroyHUD()
+        VB.recTask:terminate()
+        hs.alert.show("Cancelling…", 0.8)
+        return
+      elseif VB.state == "processing" then
         VB.runId = (VB.runId or 0) + 1   -- invalidate any in-flight daemon result
         cancelWatchdog()
         if VB.engineTask then pcall(function() VB.engineTask:terminate() end); VB.engineTask = nil end

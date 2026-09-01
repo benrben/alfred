@@ -127,6 +127,13 @@ export interface EngineResult {
   err: string;
 }
 
+export interface DaemonIdentity {
+  ok: boolean;
+  app: string;
+  schema_version: number;
+  pid: number;
+}
+
 const DAEMON_TIMEOUT_MS = 120_000;
 
 // ---- Engine CONTRACT -------------------------------------------------------
@@ -351,13 +358,27 @@ export function daemonUrl(path = "/"): string {
   return `http://127.0.0.1:${daemonPort()}${path}`;
 }
 
+/** Accept only the JSON identity emitted by Alfred's daemon. */
+export function isAlfredIdentity(value: unknown): value is DaemonIdentity {
+  if (!value || typeof value !== "object") return false;
+  const identity = value as Partial<DaemonIdentity>;
+  return (
+    identity.ok === true &&
+    identity.app === "alfred" &&
+    identity.schema_version === currentContract().schema_version &&
+    Number.isInteger(identity.pid) &&
+    (identity.pid ?? 0) > 0
+  );
+}
+
 /** Quick health check of the warm daemon (GET /). */
 export async function pingDaemon(): Promise<boolean> {
   try {
     const res = await fetch(daemonUrl("/"), {
       signal: AbortSignal.timeout(2000),
     });
-    return res.ok;
+    if (!res.ok) return false;
+    return isAlfredIdentity(await res.json());
   } catch {
     return false;
   }
@@ -369,24 +390,54 @@ export async function callEngine(argv: string[]): Promise<EngineResult> {
   // Never blocks the call and never throws (loadContract resolves to the
   // literal fallback on any error).
   if (cachedContract === undefined) void loadContract();
+  // Complete the identity handshake before sending argv/text. A foreign
+  // localhost service must not receive dictated content just because it returns
+  // HTTP 200.
+  if (!(await pingDaemon())) {
+    startDaemon(); // bring it up for next time
+    return runOneShot(argv);
+  }
+  const signal = AbortSignal.timeout(DAEMON_TIMEOUT_MS);
   try {
     const res = await fetch(daemonUrl("/"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ argv }),
-      signal: AbortSignal.timeout(DAEMON_TIMEOUT_MS),
+      signal,
     });
     if (res.ok) {
       const data = (await res.json()) as {
         code?: number;
         out?: string;
         err?: string;
+        identity?: unknown;
       };
+      if (!isAlfredIdentity(data.identity)) {
+        return {
+          code: 1,
+          out: "",
+          err: "daemon response was not from the Alfred engine; request was not replayed",
+        };
+      }
       // The daemon now returns the request's captured stderr in `err`; older
       // daemons omit it (`?? ""`), so every error toast stays informative.
       return { code: data.code ?? 0, out: data.out ?? "", err: data.err ?? "" };
     }
+    return {
+      code: 1,
+      out: "",
+      err: `daemon returned HTTP ${res.status}; request was not replayed`,
+    };
   } catch {
+    // A timeout aborts only the client fetch; the daemon may still complete the
+    // LLM and delivery. Replaying here would duplicate cost/history/paste.
+    if (signal.aborted) {
+      return {
+        code: 1,
+        out: "",
+        err: "daemon request timed out; it may still be running and was not replayed",
+      };
+    }
     // daemon unavailable — fall through to a one-shot process
   }
   startDaemon(); // bring it up for next time
@@ -423,6 +474,10 @@ export function startDaemon(): void {
       detached: true,
       stdio: "ignore",
       env: engineEnv(),
+    });
+    child.on("error", () => {
+      // Detached bootstrap is best-effort; the foreground request has its own
+      // one-shot fallback and must not crash on an asynchronous ENOENT.
     });
     child.unref();
   } catch {
@@ -656,6 +711,9 @@ export async function resolveDelivery(
         // ignore
       }
     }
+    if (!path && text === undefined) {
+      return { kind: "error", llmFailed, pasteFailed };
+    }
     return { kind, path, text, llmFailed, pasteFailed };
   }
   return { kind, llmFailed, pasteFailed };
@@ -692,7 +750,8 @@ export function readHistory(limit = 50): HistoryItem[] {
     if (!line.trim()) continue;
     try {
       const rec = JSON.parse(line) as HistoryItem;
-      if (rec && typeof rec.text === "string") items.push(rec);
+      if (rec && typeof rec.text === "string" && typeof rec.ts === "string")
+        items.push(rec);
     } catch {
       // skip malformed line
     }

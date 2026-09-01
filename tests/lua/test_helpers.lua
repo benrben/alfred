@@ -132,6 +132,7 @@ do
   eq(H.fmtTime(65), "01:05", "fmtTime(65)")
   eq(H.fmtTime(600), "10:00", "fmtTime(600)")
   eq(H.fmtTime(3599), "59:59", "fmtTime(3599)")
+  eq(H.fmtTime(-5), "00:00", "fmtTime clamps negative durations")
 end
 
 -- =====================================================================
@@ -541,6 +542,25 @@ do
     "buildStartDaemonCmd never references /tmp — that would be world-readable")
   check(cmd:find("nohup", 1, true) ~= nil, "buildStartDaemonCmd still detaches via nohup")
   check(cmd:find("8763", 1, true) ~= nil, "buildStartDaemonCmd carries the port")
+end
+
+-- =====================================================================
+-- daemon identity: a localhost HTTP 200 is not sufficient to trust a service.
+-- Restart must also accept only a recorded Alfred PID.
+-- =====================================================================
+do
+  local good = { ok = true, app = "alfred", schema_version = 1, pid = 4321,
+                 port = 8763 }
+  check(H.isAlfredIdentity(good), "isAlfredIdentity accepts Alfred")
+  check(not H.isAlfredIdentity({ ok = true, app = "other", schema_version = 1,
+                                 pid = 4321 }),
+        "isAlfredIdentity rejects a foreign service")
+  eq(H.daemonPidFromInfo("good", function() return good end), 4321,
+     "daemonPidFromInfo returns the recorded Alfred PID")
+  eq(H.daemonPidFromInfo("foreign", function()
+    return { ok = true, app = "other", schema_version = 1, pid = 4321,
+             port = 8763 }
+  end), nil, "daemonPidFromInfo rejects a foreign PID record")
 end
 
 -- ---- summary -------------------------------------------------------------

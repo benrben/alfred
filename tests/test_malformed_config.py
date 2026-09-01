@@ -41,7 +41,7 @@ class MalformedConfig(unittest.TestCase):
             rc = vb.cmd_doctor(args)
         finally:
             sys.stdout = old
-        self.assertEqual(rc, 0)                       # doctor still runs
+        self.assertEqual(rc, 1)                       # parse failure is hard
         self.assertIn("PARSE ERROR", buf.getvalue())
 
     def test_good_config_still_loads_normally(self):
