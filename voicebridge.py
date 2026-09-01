@@ -1036,12 +1036,17 @@ class WarmClaude:
             except Exception as e:                  # noqa: BLE001
                 self._stop()
                 raise RuntimeError(f"warm claude write failed: {e}")
-            deadline = time.monotonic() + (timeout or 120)
+            # timeout=None is the caller's "no limit" ([llm] timeout = 0, for big
+            # prompts): wait on the queue with no deadline rather than inventing
+            # a 120s one, so the warm path matches the one-shot path.
+            deadline = None if timeout is None else time.monotonic() + timeout
             while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    self._stop()
-                    raise RuntimeError("warm claude timed out")
+                remaining = None
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        self._stop()
+                        raise RuntimeError("warm claude timed out")
                 try:
                     line = self._q.get(timeout=remaining)
                 except queue.Empty:
