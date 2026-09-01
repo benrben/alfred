@@ -202,6 +202,17 @@ export default function Dictate(props: {
         stdio: ["ignore", "ignore", fd],
         env: engineEnv(),
       });
+      child.once("error", (error) => {
+        const current = stateRef.current;
+        if (!current || current.pid !== child.pid) return;
+        stateRef.current = null;
+        clearRecState();
+        removeIfPresent(wav);
+        removeIfPresent(meter);
+        refreshMenuBar();
+        setError(`Could not start the recorder: ${String(error)}`);
+        setPhase("error");
+      });
       child.unref();
       closeSync(fd);
       if (!child.pid) throw new Error("recorder did not start");

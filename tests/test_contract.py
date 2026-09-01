@@ -50,7 +50,8 @@ class ContractShape(unittest.TestCase):
                           "body": {"argv": ["<str>"]}})
         # response now carries err (captured stderr) additively.
         self.assertEqual(d["response"],
-                         {"code": "int", "out": "str", "err": "str"})
+                         {"code": "int", "out": "str", "err": "str",
+                          "identity": "daemon_identity"})
         self.assertEqual(d["health"], {"method": "GET", "path": "/"})
         self.assertEqual(d["identity"]["app"], "alfred")
         self.assertEqual(d["contract"], {"method": "GET", "path": "/contract"})
@@ -118,6 +119,13 @@ class ContractShape(unittest.TestCase):
         self.assertIn("resolved", emitted)
         for k in ("progress", "stream", "history", "daemon_info"):
             self.assertTrue(emitted["resolved"][k])
+
+    def test_resolved_contract_uses_serving_port(self):
+        emitted = vb.resolved_contract(vb.load_config(NO_CFG), port=9123)
+        self.assertEqual(emitted["daemon"]["port"], 9123)
+        self.assertEqual(emitted["daemon"]["url"],
+                         "http://127.0.0.1:9123/")
+        self.assertEqual(vb.CONTRACT["daemon"]["port"], 8763)
 
 
 class ProgressWriterMatchesContract(unittest.TestCase):

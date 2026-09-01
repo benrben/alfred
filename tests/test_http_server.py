@@ -136,8 +136,12 @@ class ServeRoundTrip(unittest.TestCase):
         status, obj = self._get("/contract")
         self.assertEqual(status, 200)
         self.assertEqual(obj["schema_version"], 1)
-        # GET /contract now emits the resolved contract (static keys + resolved).
-        self.assertEqual({k: obj[k] for k in vb.CONTRACT}, vb.CONTRACT)
+        # GET /contract now emits the resolved contract and the actual serving
+        # port, rather than the default port baked into the static contract.
+        expected = {**vb.CONTRACT,
+                    "daemon": {**vb.CONTRACT["daemon"], "port": self.port,
+                               "url": f"http://127.0.0.1:{self.port}/"}}
+        self.assertEqual(expected, {k: obj[k] for k in vb.CONTRACT})
         self.assertIn("resolved", obj)
 
     def test_post_argv_runs_command_and_returns_code_out_err(self):
@@ -145,8 +149,9 @@ class ServeRoundTrip(unittest.TestCase):
         self.assertEqual(status, 200)
         for k in ("code", "out", "err"):
             self.assertIn(k, obj)
-        self.assertEqual(obj["code"], 0)            # doctor returns 0
+        self.assertIn(obj["code"], (0, 1))          # missing deps are a hard check
         self.assertIn("Alfred doctor", obj["out"])  # its stdout is captured
+        self.assertEqual(obj["identity"]["app"], "alfred")
 
     def test_post_contract_command_round_trips_json(self):
         # `contract` prints the resolved contract; the daemon captures it.

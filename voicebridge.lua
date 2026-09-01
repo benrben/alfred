@@ -346,6 +346,26 @@ local STATUS_SEP      = "\t"
 local RESULT_SENTINEL = "VB_RESULT"
 local LLM_FAILED      = "llm_failed"
 local PASTE_FAILED    = "paste_failed"
+local DAEMON_SCHEMA_VERSION = 1
+
+-- The health response is an identity handshake, not merely an HTTP status.
+-- A different localhost service must never receive dictated text or argv.
+local function isAlfredIdentity(identity)
+  return type(identity) == "table"
+    and identity.ok == true
+    and identity.app == "alfred"
+    and identity.schema_version == DAEMON_SCHEMA_VERSION
+    and type(identity.pid) == "number"
+    and identity.pid > 0 and identity.pid % 1 == 0
+end
+
+local function daemonPidFromInfo(content, decode)
+  local ok, info = pcall(decode, content or "")
+  if ok and isAlfredIdentity(info) and type(info.port) == "number" then
+    return math.floor(info.pid)
+  end
+  return nil
+end
 
 -- Parse the engine's machine-readable status line into its tab-separated parts:
 -- "VB_STATUS\tkind[\textra...]" -> { kind, extra... }; nil when none is present.
@@ -520,13 +540,31 @@ function startDaemon()
 end
 
 function ensureDaemon()
-  hs.http.asyncGet(DAEMON_URL, nil, function(status)
-    if status ~= 200 then startDaemon() end
+  hs.http.asyncGet(DAEMON_URL, nil, function(status, body)
+    local ok, identity = pcall(hs.json.decode, body or "")
+    if status == -1004 then
+      startDaemon()
+    elseif status == 200 and ok and isAlfredIdentity(identity) then
+      return
+    elseif status == 200 then
+      dbg("ensureDaemon: port is occupied by a non-Alfred service")
+      notify("Alfred", "Port " .. DAEMON_PORT .. " is not an Alfred engine.")
+    end
   end)
 end
 
 function restartDaemon()
-  hs.execute("pkill -f 'voicebridge.py serve' 2>/dev/null")
+  local resolved = VB.contract and type(VB.contract.resolved) == "table"
+                   and VB.contract.resolved.daemon_info
+  local f = io.open(resolved or (VB_DIR .. "/daemon.json"), "r")
+  local content = f and f:read("*a") or ""
+  if f then f:close() end
+  local pid = daemonPidFromInfo(content, hs.json.decode)
+  if pid then
+    hs.execute("/bin/kill -TERM " .. tostring(pid) .. " 2>/dev/null")
+  else
+    dbg("restartDaemon: no recorded Alfred daemon PID")
+  end
   hs.alert.show("Restarting Alfred engine…", 1)
   hs.timer.doAfter(0.6, startDaemon)
 end
@@ -586,9 +624,10 @@ function runEngine(argv, recordingFinished)
   -- Prefer the warm daemon; fall back to a one-shot process ONLY when it is DOWN
   -- (see classifyPost): a >60s job would otherwise time the POST out at ~60s and
   -- get re-run, double-writing history/clipboard.
-  hs.http.asyncPost(DAEMON_URL, hs.json.encode({ argv = cmd }),
-    { ["Content-Type"] = "application/json" },
-    function(status, body)
+  local function postToDaemon()
+    hs.http.asyncPost(DAEMON_URL, hs.json.encode({ argv = cmd }),
+      { ["Content-Type"] = "application/json" },
+      function(status, body)
       if myRun ~= VB.runId then
         dbg("runEngine[" .. myRun .. "]: stale result (cur=" .. tostring(VB.runId) .. ") — dropped")
         return
@@ -596,15 +635,16 @@ function runEngine(argv, recordingFinished)
       local outcome = classifyPost(status, body ~= nil and #body > 0)
       if outcome == "ok" then
         local ok, resp = pcall(hs.json.decode, body)
-        if ok and type(resp) == "table" then
+        if ok and type(resp) == "table" and isAlfredIdentity(resp.identity) then
           dbg("daemon result code=" .. tostring(resp.code))
           onResult(resp.code or 0, resp.out or "", resp.err or "")   -- thread err
           return
         end
-        -- 200 but unreadable: don't re-run (the engine may have done the work).
+        -- 200 but unreadable/foreign: don't re-run (the engine may have done
+        -- the work, and replaying argv could duplicate delivery).
         cancelWatchdog(); setState("idle")
-        dbg("daemon 200 but undecodable body")
-        notify("Alfred", "The engine returned an unreadable response.")
+        dbg("daemon 200 but response identity was invalid")
+        notify("Alfred", "The response was not from the Alfred engine.")
       elseif outcome == "down" then
         dbg("daemon down (status=" .. tostring(status) .. ") -> one-shot")
         runEngineOneShot(cmd)   -- watchdog stays armed to bound the one-shot
@@ -613,7 +653,23 @@ function runEngine(argv, recordingFinished)
         dbg("daemon busy (status=" .. tostring(status) .. ") -> keep processing, no re-run")
         notify("Alfred", "Still transcribing… the engine is taking a while.")
       end
-    end)
+      end)
+  end
+  -- Validate the listening service before sending argv/text. A foreign service
+  -- returning HTTP 200 must not receive the dictated payload.
+  hs.http.asyncGet(DAEMON_URL, nil, function(status, body)
+    if myRun ~= VB.runId then return end
+    local ok, identity = pcall(hs.json.decode, body or "")
+    if status == 200 and ok and isAlfredIdentity(identity) then
+      postToDaemon()
+    elseif status == -1004 then
+      runEngineOneShot(cmd)
+      ensureDaemon()
+    else
+      cancelWatchdog(); setState("idle")
+      notify("Alfred", "The configured daemon is not an Alfred engine.")
+    end
+  end)
   return true
 end
 
@@ -682,6 +738,7 @@ end
 -- the literal fallbacks where a field is missing (older engine). Touches only
 -- primitives already defaulted above, so a partial contract degrades gracefully.
 local function applyContract(c)
+  if type(c.schema_version) == "number" then DAEMON_SCHEMA_VERSION = c.schema_version end
   local sl = type(c.status_line) == "table" and c.status_line or {}
   if type(sl.sentinel) == "string" then STATUS_SENTINEL = sl.sentinel end
   if type(sl.sep) == "string" then STATUS_SEP = sl.sep end
@@ -1391,7 +1448,9 @@ if os.getenv("VB_LUA_TEST") then
            errorMessage = errorMessage, resultBanner = resultBanner,
            classifyPost = classifyPost, buildEngineArgv = buildEngineArgv,
            -- daemon-launch pure logic
-           buildStartDaemonCmd = buildStartDaemonCmd }
+           buildStartDaemonCmd = buildStartDaemonCmd,
+           isAlfredIdentity = isAlfredIdentity,
+           daemonPidFromInfo = daemonPidFromInfo }
 end
 
 -- ---- Consume the engine contract (one fetch, cached) ---------------------

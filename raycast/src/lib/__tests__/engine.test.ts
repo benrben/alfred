@@ -341,6 +341,47 @@ describe("daemonUrl", () => {
   });
 });
 
+describe("daemon identity", () => {
+  it("accepts Alfred's health identity", async () => {
+    const { engine } = await freshEngine();
+    expect(
+      engine.isAlfredIdentity({
+        ok: true,
+        app: "alfred",
+        schema_version: 1,
+        pid: 1234,
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects a foreign or malformed localhost response", async () => {
+    const { engine } = await freshEngine();
+    expect(engine.isAlfredIdentity({ ok: true })).toBe(false);
+    expect(
+      engine.isAlfredIdentity({
+        ok: true,
+        app: "other-service",
+        schema_version: 1,
+        pid: 1234,
+      }),
+    ).toBe(false);
+  });
+
+  it("requires the identity when checking daemon health", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      );
+    const { engine } = await freshEngine();
+    expect(await engine.pingDaemon()).toBe(false);
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("127.0.0.1:8763/"),
+      expect.objectContaining({ signal: expect.anything() }),
+    );
+  });
+});
+
 describe("schema_version compatibility", () => {
   it("the fallback contract matches the engine's current schema_version (1)", async () => {
     const { engine } = await freshEngine();

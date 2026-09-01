@@ -183,7 +183,8 @@ CONTRACT: dict = {
         # `err` carries the request's captured stderr (error detail) so a
         # front-end can show WHAT failed. Added additively; older daemons omit it
         # and front-ends treat a missing err as "".
-        "response": {"code": "int", "out": "str", "err": "str"},
+        "response": {"code": "int", "out": "str", "err": "str",
+                      "identity": "daemon_identity"},
         "health": {"method": "GET", "path": "/"},
         # GET / responds with this identity so a front-end (and `serve` itself on
         # a busy port) can tell an Alfred daemon from a foreign server.
@@ -275,7 +276,7 @@ def _daemon_info_path() -> Path:
     return Path(CONTRACT["daemon"]["info_file"]).expanduser()
 
 
-def resolved_contract(cfg: dict | None = None) -> dict:
+def resolved_contract(cfg: dict | None = None, port: int | None = None) -> dict:
     """The CONTRACT with a `resolved` block of ABSOLUTE, config-aware paths.
 
     The static CONTRACT carries "~/..." templates and the DEFAULT history path;
@@ -291,7 +292,11 @@ def resolved_contract(cfg: dict | None = None) -> dict:
         "config": str(cfg.get("_loaded_from")) if cfg and cfg.get("_loaded_from")
         else "",
     }
-    return {**CONTRACT, "resolved": resolved}
+    daemon = dict(CONTRACT["daemon"])
+    if port is not None:
+        daemon["port"] = int(port)
+        daemon["url"] = daemon["url"].format(port=int(port))
+    return {**CONTRACT, "daemon": daemon, "resolved": resolved}
 
 
 def _deep_merge(base: dict, over: dict) -> dict:
@@ -828,6 +833,11 @@ def candidate_backends(cfg: dict) -> list[str]:
     We deliberately do NOT fall back from 'local' to a network CLI: strict-local
     must never silently make a cloud call."""
     want = cfg["llm"]["backend"]
+    if want not in {"local", "auto", "claude", "codex"}:
+        raise RuntimeError(
+            f"invalid [llm] backend '{want}'; choose one of: "
+            "local, auto, claude, codex"
+        )
     if want == "local":
         return ["local"]
     have = detect_backends()
@@ -2096,7 +2106,12 @@ def cmd_history(args) -> int:
         if not line.strip():
             continue
         try:
-            recs.append(json.loads(line))
+            rec = json.loads(line)
+            if (isinstance(rec, dict) and isinstance(rec.get("ts"), str)
+                    and isinstance(rec.get("source"), str)
+                    and type(rec.get("chars")) is int
+                    and isinstance(rec.get("text"), str)):
+                recs.append(rec)
         except (json.JSONDecodeError, ValueError):
             continue                                 # skip a corrupt line, keep going
     if args.copy is not None:
@@ -2404,11 +2419,12 @@ def cmd_doctor(args) -> int:
     print(f"backend: {cfg['llm']['backend']}   output: {cfg['output']['mode']}   "
           f"save_dir: {cfg['output']['save_dir']}")
     sd = Path(cfg["output"]["save_dir"]).expanduser()
-    try:
-        sd.mkdir(parents=True, exist_ok=True)
+    if sd.is_dir() and os.access(sd, os.W_OK):
         print(f"{ok}save_dir writable: {sd}")
-    except Exception as e:                          # noqa: BLE001
-        print(f"{bad}save_dir not writable: {sd} ({e})")
+    elif sd.exists():
+        print(f"{bad}save_dir not writable: {sd}")
+    else:
+        print(f"{warn}save_dir not present: {sd} (created on first save)")
 
     # macOS permissions (TCC) — a STATIC note, not a live probe. Actively
     # querying Accessibility (osascript "System Events" UI-elements-enabled) hangs
@@ -2433,7 +2449,16 @@ def cmd_doctor(args) -> int:
         print(f"{bad}port {CONTRACT['daemon']['port']} held by a NON-Alfred server")
     else:
         print(f"{warn}warm daemon: not running (starts on first capture)")
-    return 0
+    hard_failures = (["config"] if cfg.get("_config_error") else [])
+    hard_failures += [mod for mod in ("mlx_whisper", "soundfile", "numpy")
+                     if not _installed(mod)]
+    if shutil.which("sox") is None:
+        hard_failures.append("sox")
+    if platform.system() == "Darwin" and shutil.which("pbcopy") is None:
+        hard_failures.append("pbcopy")
+    if sd.exists() and not (sd.is_dir() and os.access(sd, os.W_OK)):
+        hard_failures.append("save_dir")
+    return 1 if hard_failures else 0
 
 
 # ----------------------------------------------------------------------------
@@ -2643,7 +2668,7 @@ def cmd_serve(args) -> int:
                 return
             if self.path == "/contract":               # the IPC contract
                 self._json(200, resolved_contract(
-                    load_config(getattr(args, "config", None))))
+                    load_config(getattr(args, "config", None)), int(args.port)))
             else:                                       # health + identity
                 self._json(200, _daemon_identity())
 
@@ -2698,7 +2723,7 @@ def cmd_serve(args) -> int:
             if err_text:                               # keep it in the daemon log too
                 _real_err.write(err_text)
             self._json(200, {"code": code, "out": out_buf.getvalue(),
-                             "err": err_text})
+                             "err": err_text, "identity": _daemon_identity()})
 
         def log_message(self, *a):
             pass

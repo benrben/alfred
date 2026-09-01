@@ -25,6 +25,10 @@ def cfg(**llm):
 
 
 class ReasoningEffortFlags(unittest.TestCase):
+    def test_invalid_backend_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "invalid .*backend"):
+            vb.candidate_backends(cfg(backend="bogus"))
+
     def test_defaults_are_low(self):
         c = vb.load_config(NO_CFG)
         self.assertEqual(c["llm"]["claude_effort"], "low")
