@@ -104,9 +104,9 @@ Switch the **LLM backend** live with `⌘B` in Dictate (`local` / `auto` /
 The front-end keeps a **warm engine** running in the background — a small
 localhost daemon (`voicebridge.py serve`) that holds the Whisper model in memory
 so each dictation skips the multi-second model load. It starts automatically in
-the background; if it ever wedges, **Engine Status** shows the problem and
-`voicebridge.py doctor` can restart it. (The very first run still downloads
-the model once.)
+the background; if it ever wedges, **Engine Status** and `voicebridge.py doctor`
+show the problem, and the Raycast engine starts the daemon again on the next
+capture. (The very first run still downloads the model once.)
 
 The LLM step also runs at **low reasoning effort** by default (claude `--effort
 low`, codex `model_reasoning_effort=low`) — deep "thinking" isn't needed to clean
