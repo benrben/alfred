@@ -129,6 +129,9 @@ $PY voicebridge.py process recording.wav --translate --mode email
 $PY voicebridge.py process recording.wav --transcribe-only   # raw, no LLM
 $PY voicebridge.py history            # list recent results
 $PY voicebridge.py history --copy 0   # re-copy the most recent
+$PY voicebridge.py modes              # list built-in and custom intents
+$PY voicebridge.py settings           # print the current backend and defaults
+$PY voicebridge.py doctor             # check dependencies, permissions, and daemon
 ```
 
 Per-run flags override the config: `--translate/--no-translate`, `--rewrite`,
@@ -136,6 +139,12 @@ Per-run flags override the config: `--translate/--no-translate`, `--rewrite`,
 winning over the others), `--mode email|message|commit|prompt|notes|raw`,
 `--backend local|auto|claude|codex`, `--model`, `--language he`, `--paste`,
 `--stdout`.
+
+The `text` command accepts text as an argument or reads stdin when the argument
+is omitted (or set to `-`). Use `--instruction "make it shorter"` for a
+one-off refinement instead of the configured stages. For integration and
+front-end debugging, `contract` prints the versioned IPC contract as JSON and
+`serve --port 8763` starts the localhost daemon used by Raycast.
 
 **Long recordings.** There's no cap on how long you can speak (the front-ends
 self-stop at 60 min as a runaway guard). A long transcript is auto-split at
@@ -235,6 +244,7 @@ entry point runs both (each is <10s):
 make dev      # once: install pytest + ruff into the venv
 make test     # run both suites (Python + Raycast/TS)
 make lint     # ruff + eslint
+make typecheck # TypeScript typecheck for the Raycast extension
 ```
 
 Or individually: `make test-py`, `make test-ts`. CI
