@@ -119,6 +119,24 @@ short chunk remains — a long clip's multi-second post-stop wait drops to ~1–
 and the Raycast Dictate view shows the transcript building live. (A native
 word-by-word streaming engine is a further optional upgrade.)
 
+### Request pipeline tour (daemon path)
+
+A `process`/`stream-finish`/`text` action follows this live path:
+
+- Front-end posts `POST /` with `{"argv":["process", "..."]}` (or `text`,
+  `stream-start`, etc.).
+- The daemon parses the JSON body and dispatches `argv` through the same
+  argparse command mapping as CLI mode.
+- Runtime executes the chosen command path, updates progress, then runs STT (audio
+  paths), optional LLM stages, history write, and delivery.
+- The engine writes the final machine-readable signals in order: optional
+  `VB_RESULT<TAB><json text>` for the exact delivered payload, then final
+  `VB_STATUS<TAB>...` with `copied`/`saved`/`empty` or `error` + subtype.
+- The HTTP response back to the caller is
+  `{"code": int, "out": str, "err": str}` where `out` includes the status lines.
+- Delivery failures are kept from losing data: history is appended before the final
+  delivery step.
+
 ### From the terminal (no hotkey needed)
 
 ```bash
