@@ -129,8 +129,11 @@ The daemon request path is:
 3. Audio uses `process` or `stream-start`/`stream-finish`; text uses `text` and
    skips transcription.
 4. Audio is transcribed; configured `translation`, `rewrite`, and
-   `optimization` stages then run through the selected backend.
-5. The result is appended to history before delivery.
+   `optimization` stages then run, with translation handled by Whisper when
+   `translate_via = "whisper"` is supported by the configured model, or by the
+   selected LLM backend otherwise.
+5. For normal delivery requests (not `--stdout`), the result is appended to
+   history before delivery.
 6. Delivery copies to the clipboard, optionally auto-pastes, or saves oversized
    output to a file.
 7. The engine emits `VB_RESULT` with the exact delivered text, then `VB_STATUS`,
