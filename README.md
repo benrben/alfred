@@ -31,7 +31,7 @@ tiny CLI / localhost-HTTP contract.
 ## Requirements
 
 - Apple Silicon Mac (M1+) — required by `mlx-whisper`.
-- `python3` (3.11+ recommended), Homebrew.
+- `python3` 3.11+ (required), Homebrew.
 - `sox` for recording: `brew install sox`.
 - Raycast for hotkeys and every command UI: [raycast.com](https://raycast.com).
 - For translate/rewrite/optimize: either the default **on-device** model
