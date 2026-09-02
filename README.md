@@ -31,7 +31,7 @@ tiny CLI / localhost-HTTP contract.
 ## Requirements
 
 - Apple Silicon Mac (M1+) — required by `mlx-whisper`.
-- `python3` (3.11+ recommended), Homebrew.
+- `python3` 3.11+ (required), Homebrew.
 - `sox` for recording: `brew install sox`.
 - Raycast for hotkeys and every command UI: [raycast.com](https://raycast.com).
 - For translate/rewrite/optimize: either the default **on-device** model
@@ -104,9 +104,9 @@ Switch the **LLM backend** live with `⌘B` in Dictate (`local` / `auto` /
 The front-end keeps a **warm engine** running in the background — a small
 localhost daemon (`voicebridge.py serve`) that holds the Whisper model in memory
 so each dictation skips the multi-second model load. It starts automatically in
-the background; if it ever wedges, **Engine Status** shows the problem and
-`voicebridge.py doctor` can restart it. (The very first run still downloads
-the model once.)
+the background; if it ever wedges, **Engine Status** and `voicebridge.py doctor`
+show the problem, and the Raycast engine starts the daemon again on the next
+capture. (The very first run still downloads the model once.)
 
 The LLM step also runs at **low reasoning effort** by default (claude `--effort
 low`, codex `model_reasoning_effort=low`) — deep "thinking" isn't needed to clean
@@ -129,6 +129,9 @@ $PY voicebridge.py process recording.wav --translate --mode email
 $PY voicebridge.py process recording.wav --transcribe-only   # raw, no LLM
 $PY voicebridge.py history            # list recent results
 $PY voicebridge.py history --copy 0   # re-copy the most recent
+$PY voicebridge.py modes              # list built-in and custom intents
+$PY voicebridge.py settings           # print the current backend and defaults
+$PY voicebridge.py doctor             # check dependencies, permissions, and daemon
 ```
 
 Per-run flags override the config: `--translate/--no-translate`, `--rewrite`,
@@ -136,6 +139,12 @@ Per-run flags override the config: `--translate/--no-translate`, `--rewrite`,
 winning over the others), `--mode email|message|commit|prompt|notes|raw`,
 `--backend local|auto|claude|codex`, `--model`, `--language he`, `--paste`,
 `--stdout`.
+
+The `text` command accepts text as an argument or reads stdin when the argument
+is omitted (or set to `-`). Use `--instruction "make it shorter"` for a
+one-off refinement instead of the configured stages. For integration and
+front-end debugging, `contract` prints the versioned IPC contract as JSON and
+`serve --port 8763` starts the localhost daemon used by Raycast.
 
 **Long recordings.** There's no cap on how long you can speak (the front-ends
 self-stop at 60 min as a runaway guard). A long transcript is auto-split at
@@ -235,6 +244,7 @@ entry point runs both (each is <10s):
 make dev      # once: install pytest + ruff into the venv
 make test     # run both suites (Python + Raycast/TS)
 make lint     # ruff + eslint
+make typecheck # TypeScript typecheck for the Raycast extension
 ```
 
 Or individually: `make test-py`, `make test-ts`. CI
