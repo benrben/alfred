@@ -119,6 +119,39 @@ short chunk remains — a long clip's multi-second post-stop wait drops to ~1–
 and the Raycast Dictate view shows the transcript building live. (A native
 word-by-word streaming engine is a further optional upgrade.)
 
+### Request pipeline
+
+The daemon request path is:
+
+1. Raycast or another loopback client sends `POST /` with `{"argv":[...]}`.
+2. The daemon enforces loopback-only ingress and CORS/Host checks, parses JSON,
+   and dispatches through the shared CLI parser.
+3. Audio uses `process` or `stream-start`/`stream-finish`; text uses `text` and
+   skips transcription.
+4. Audio is transcribed; configured `translation`, `rewrite`, and
+   `optimization` stages then run, with translation handled by Whisper when
+   `translate_via = "whisper"` is supported by the configured model, or by the
+   selected LLM backend otherwise.
+5. For normal delivery requests (not `--stdout`), the result is appended to
+   history before delivery.
+6. Delivery copies to the clipboard, optionally auto-pastes, or saves oversized
+   output to a file.
+7. For normal delivery requests (not `--stdout`), the engine emits `VB_RESULT`
+   with the exact delivered text, then `VB_STATUS`; `--stdout` writes the text
+   directly instead. The daemon returns `{"code": int, "out": str, "err": str}`.
+8. Raycast prefers `VB_RESULT` for text and uses `VB_STATUS` plus error data for
+   the UI outcome.
+
+Illustrative wire shape only (not a normative example for every command):
+
+```text
+Request JSON: {"argv":["text","hello world"]}
+HTTP 200: {"code":0,"out":"VB_RESULT\t\"hello world\"\nVB_STATUS\tcopied\n","err":""}
+```
+
+Raycast prefers the warm daemon and falls back to the one-shot CLI when the
+daemon is unavailable.
+
 ### From the terminal (no hotkey needed)
 
 ```bash
