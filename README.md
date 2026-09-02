@@ -136,8 +136,9 @@ The daemon request path is:
    history before delivery.
 6. Delivery copies to the clipboard, optionally auto-pastes, or saves oversized
    output to a file.
-7. The engine emits `VB_RESULT` with the exact delivered text, then `VB_STATUS`,
-   and the daemon returns `{"code": int, "out": str, "err": str}`.
+7. For normal delivery requests (not `--stdout`), the engine emits `VB_RESULT`
+   with the exact delivered text, then `VB_STATUS`; `--stdout` writes the text
+   directly instead. The daemon returns `{"code": int, "out": str, "err": str}`.
 8. Raycast prefers `VB_RESULT` for text and uses `VB_STATUS` plus error data for
    the UI outcome.
 
