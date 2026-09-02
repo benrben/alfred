@@ -256,6 +256,10 @@ make quality        # fast pass over your local changes; read the "To fix" list
 make quality-ship   # the ship report: every gate, must be green before handoff
 ```
 
+### Relay E2E verification
+
+This is a documentation-only workflow check.
+
 ### Front-end ↔ engine compatibility
 
 The engine publishes a versioned IPC **contract** (`voicebridge.py contract` /
